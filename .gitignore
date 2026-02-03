@@ -1,0 +1,10 @@
+targets
+*.tar.gz
+*.out
+*.o
+*.log
+*.tmp
+dist/
+build/
+node_modules/
+.env
