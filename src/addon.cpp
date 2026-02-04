@@ -37,6 +37,33 @@ using namespace v8;
 
 /* Todo: Apps should be freed once the GC says so BUT ALWAYS before freeing the loop */
 
+/* Definition of getReqKeys needed by AppWrapper.h */
+constexpr int kReqKeysSlot = 1; // FIXME: ? I am unsure about the right way to do this.
+ReqKeys &getReqKeys(v8::Isolate *isolate) {
+    void *p = isolate->GetData(kReqKeysSlot);
+    if (p)
+        return *static_cast<ReqKeys *>(p);
+
+    auto *keys = new ReqKeys();
+
+    auto mk = [&](const char *s) {
+        return v8::String::NewFromUtf8(isolate, s, v8::NewStringType::kInternalized)
+            .ToLocalChecked();
+    };
+
+    keys->method.Set(isolate, mk("method"));
+    keys->origin.Set(isolate, mk("origin"));
+    keys->secure.Set(isolate, mk("secure"));
+    keys->host.Set(isolate, mk("host"));
+    keys->domain.Set(isolate, mk("domain"));
+    keys->path.Set(isolate, mk("path"));
+    keys->contentType.Set(isolate, mk("contentType"));
+    keys->contentLength.Set(isolate, mk("contentLength"));
+
+    isolate->SetData(kReqKeysSlot, keys);
+    return *keys;
+}
+
 #include "Multipart.h"
 
 /* This function is somewhat of a simplifying wrapper that does not follow the C++ library.

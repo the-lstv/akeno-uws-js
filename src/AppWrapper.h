@@ -20,6 +20,53 @@
 #include "Utilities.h"
 using namespace v8;
 
+
+
+/**
+ * WARNING: the following code is a prototype and NOT production code.
+ * It's really slow and low-quality at this moment;
+ * I am just looking for ways to bring the routing logic to C++, so C++ cache can be implemented,
+ * there are less JS<->C++ calls, and multithreading is easier (currently quite hard as all apps go through one JS handler, which is not ideal).
+ */
+
+/* Helper for resolve() logic (not prod. ready) */
+std::string decodeURIComponent(std::string_view url) {
+    std::string decoded;
+    decoded.reserve(url.length());
+    for (size_t i = 0; i < url.length(); ++i) {
+        if (url[i] == '%' && i + 2 < url.length()) {
+            char key[3] = {url[i + 1], url[i + 2], '\0'};
+            char *end;
+            unsigned long value = strtoul(key, &end, 16);
+            if (end == key + 2) {
+                decoded += (char)value;
+                i += 2;
+            } else {
+                decoded += url[i];
+            }
+        } else {
+            decoded += url[i];
+        }
+    }
+    return decoded;
+}
+
+inline v8::Local<v8::String>
+oneByte(v8::Isolate* isolate, std::string_view sv) {
+    return v8::String::NewFromOneByte(
+        isolate,
+        reinterpret_cast<const uint8_t*>(sv.data()),
+        v8::NewStringType::kNormal,
+        static_cast<int>(sv.size())
+    ).ToLocalChecked();
+}
+
+struct ReqKeys {
+    v8::Eternal<v8::String> method, origin, secure, host, domain, path, contentType, contentLength;
+};
+
+ReqKeys& getReqKeys(v8::Isolate* isolate);
+
 /* uWS.App.ws('/pattern', behavior) */
 template <typename APP>
 void uWS_App_ws(const FunctionCallbackInfo<Value> &args) {
@@ -124,6 +171,9 @@ void uWS_App_ws(const FunctionCallbackInfo<Value> &args) {
         behavior.upgrade = [upgradePf = std::move(upgradePf), perContextData](auto *res, auto *req, auto *context) {
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
+
+            // TODO:
+            // if (resolve<APP>(perContextData, res, req, resObject, reqObject)) return;
 
             Local<Function> upgradeLf = Local<Function>::New(isolate, upgradePf);
             Local<Object> resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
@@ -436,14 +486,137 @@ void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
     PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
 
     (app->*f)(std::string(pattern.getString()), [cb = std::move(cb), perContextData](auto *res, auto *req) {
+        using namespace v8;
+
+        // ! TODO: Move this
+
+        std::string_view method;
+        if constexpr (std::is_same<APP, uWS::H3App>::value) {
+            method = req->getHeader(":method");
+        } else {
+            method = req->getCaseSensitiveMethod();
+        }
+
+        // OPTIONS fast-path
+        // IMPORTANT TODO: More flexible CORS handling, though I don't know how to approach this yet.
+        if (method == "OPTIONS") {
+            res->writeHeader("Access-Control-Allow-Origin", "*");
+            res->writeHeader("Access-Control-Allow-Methods",
+                            "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
+            res->writeHeader("Access-Control-Allow-Headers",
+                            "Content-Type, Authorization");
+            res->writeHeader("Cache-Control", "max-age=1382400");
+            res->writeHeader("Access-Control-Max-Age", "1382400");
+            res->end();
+            return;
+        }
+
+        std::string_view host = req->getHeader("host");
+        if constexpr (std::is_same<APP, uWS::H3App>::value) {
+            if (host.empty()) {
+                host = req->getHeader(":authority");
+            }
+        }
+
+        if (host.empty())
+            host = "";
+
+        std::string_view domain = host;
+        if (!host.empty()) {
+            if (host.front() == '[') {
+                // IPv6 literal: [::1]:443
+                auto end = host.find(']');
+                if (end != std::string_view::npos)
+                    domain = host.substr(0, end + 1);
+            } else {
+                auto colon = host.rfind(':');
+                if (colon != std::string_view::npos)
+                    domain = host.substr(0, colon);
+            }
+        }
+
+        std::string_view url;
+        if constexpr (std::is_same<APP, uWS::H3App>::value) {
+            url = req->getHeader(":path");
+        } else {
+            url = req->getUrl();
+        }
+
+        // www redirect fast-path
+        if (domain.size() >= 4 && domain.starts_with("www.")) {
+            res->writeStatus("301 Moved Permanently");
+
+            std::string location;
+            location.reserve(8 + domain.size() + url.size());
+            constexpr bool SSL = std::is_same<APP, uWS::SSLApp>::value;
+            location += SSL ? "https://" : "http://";
+            location.append(domain.data() + 4, domain.size() - 4);
+            location += url;
+
+            res->writeHeader("Location", location);
+            res->end();
+            return;
+        }
+
+        // At this point, we are handing to JS:
         Isolate *isolate = perContextData->isolate;
         HandleScope hs(isolate);
 
-        Local<Object> resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
+        Local<Object> resObject, reqObject;
+        Local<Context> context = isolate->GetCurrentContext();
+        ReqKeys &keys = getReqKeys(isolate);
+
+        resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
         resObject->SetAlignedPointerInInternalField(0, res);
 
-        Local<Object> reqObject = perContextData->reqTemplate[std::is_same<APP, uWS::H3App>::value].Get(isolate)->Clone();
+        reqObject = perContextData->reqTemplate[std::is_same<APP, uWS::H3App>::value].Get(isolate)->Clone();
         reqObject->SetAlignedPointerInInternalField(0, req);
+
+        reqObject->Set(context, keys.method.Get(isolate),
+                    oneByte(isolate, method)).Check();
+
+        std::string_view origin = req->getHeader("origin");
+        reqObject->Set(context, keys.origin.Get(isolate),
+                    oneByte(isolate, origin)).Check();
+
+        constexpr bool SSL = std::is_same<APP, uWS::SSLApp>::value;
+        reqObject->Set(context, keys.secure.Get(isolate),
+                    Boolean::New(isolate, SSL)).Check();
+
+        reqObject->Set(context, keys.host.Get(isolate),
+                    oneByte(isolate, host)).Check();
+
+        reqObject->Set(context, keys.domain.Get(isolate),
+                    oneByte(isolate, domain)).Check();
+
+        // Decode only if needed
+        if (url.find('%') != std::string_view::npos) {
+            std::string decoded = decodeURIComponent(url);
+            reqObject->Set(context, keys.path.Get(isolate),
+                        oneByte(isolate, decoded))
+                .Check();
+        } else {
+            reqObject->Set(context, keys.path.Get(isolate),
+                        oneByte(isolate, url))
+                .Check();
+        }
+
+        // Methods that are likely to have a body
+        // MAYBE TODO: We could use an ENUM for methods instead, and expose something like backend.METHOD_GET in JS
+        if (method == "POST" ||
+            method == "PUT" ||
+            method == "PATCH" ||
+            method == "DELETE") {
+            std::string_view ct = req->getHeader("content-type");
+            reqObject->Set(context, keys.contentType.Get(isolate),
+                        oneByte(isolate, ct))
+                .Check();
+
+            std::string_view cl = req->getHeader("content-length");
+            reqObject->Set(context, keys.contentLength.Get(isolate),
+                        oneByte(isolate, cl))
+                .Check();
+        }
 
         Local<Value> argv[] = {resObject, reqObject};
         CallJS(isolate, cb.Get(isolate), 2, argv);

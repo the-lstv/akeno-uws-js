@@ -1,0 +1,10 @@
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 0
+
+BraceWrapping:
+  AfterFunction: false
+  AfterClass: false
+  AfterControlStatement: false
+  BeforeElse: false
+  BeforeCatch: false

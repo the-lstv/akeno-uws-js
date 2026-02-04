@@ -59,3 +59,9 @@ module.exports.DeclarativeResponse = class DeclarativeResponse {
     return new Uint8Array(this.instructions).buffer;
   }
 }
+
+// This is a custom build for Akeno
+module.exports.isAkeno = true;
+
+// Which Akeno version we are compatible with, it can be any valid Units.Version comparator (eg. >=1.2.3, etc.)
+module.exports.akenoCompatibility = "1.6.8";
