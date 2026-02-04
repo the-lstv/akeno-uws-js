@@ -8,3 +8,18 @@ dist/
 build/
 node_modules/
 .env
+
+
+# I will add this later
+Router.h
+RouterTests.cpp
+
+
+# Windows is dumb, so I needed to patch the build script
+# It took me half a day just to get it to build (and I still needed to use hacks)
+# tbqh the only reason i bother with windows is because i am forced to use it on my school pc, otherwise there would likely be no windows build of Akeno
+build.w.c
+*.bat
+*.exe
+*.obj
+zlib*

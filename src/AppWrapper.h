@@ -486,8 +486,6 @@ void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
     PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
 
     (app->*f)(std::string(pattern.getString()), [cb = std::move(cb), perContextData](auto *res, auto *req) {
-        using namespace v8;
-
         // ! TODO: Move this
 
         std::string_view method;
