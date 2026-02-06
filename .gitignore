@@ -10,9 +10,8 @@ node_modules/
 .env
 
 
-# I will add this later
-Router.h
-RouterTests.cpp
+# Router is still very rough
+RouterTests
 
 
 # Windows is dumb, so I needed to patch the build script

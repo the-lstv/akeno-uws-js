@@ -19,6 +19,9 @@
 #include "App.h"
 #include "Http3App.h"
 
+// Important TODO: keep version in sync with package.json
+#define AKENO_VERSION "1.6.8-beta"
+
 #include <iostream>
 #include <vector>
 #include <type_traits>
@@ -31,6 +34,9 @@ using namespace v8;
 #include "HttpResponseWrapper.h"
 #include "HttpRequestWrapper.h"
 #include "AppWrapper.h"
+#include "Router.h"
+
+Akeno::DomainRouter<DomainHandler> domainRouter;
 
 #include <numeric>
 #include <functional>
@@ -172,6 +178,43 @@ void uWS_clearTimeout(const FunctionCallbackInfo<Value> &args) {
     //clearTimeout_(timer);
 
     //timerCallbacksJS[timer].Reset();
+}
+
+void uWS_routeDomain(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(2, args)) {
+        return;
+    }
+
+    NativeString pattern(isolate, args[0]);
+    if (pattern.isInvalid(args)) {
+        return;
+    }
+
+    Local<Value> handlerValue = args[1];
+    DomainHandler handler;
+
+    if (handlerValue->IsFunction()) {
+        handler = DomainHandler::fromJsFunction(isolate, Local<Function>::Cast(handlerValue));
+    } else if (handlerValue->IsArrayBuffer() || handlerValue->IsTypedArray() || handlerValue->IsSharedArrayBuffer() || handlerValue->IsString()) {
+        NativeString bufferValue(isolate, handlerValue);
+        if (bufferValue.isInvalid(args)) {
+            return;
+        }
+        std::string buffer(bufferValue.getString().data(), bufferValue.getString().length());
+        handler = DomainHandler::fromStaticBuffer(std::move(buffer));
+    } else if (handlerValue->IsExternal()) {
+        auto *matcher = static_cast<Akeno::PathMatcher<DomainHandler> *>(Local<External>::Cast(handlerValue)->Value());
+        handler = DomainHandler::fromPathMatcher(matcher);
+    } else if (handlerValue->IsObject()) {
+        handler = DomainHandler::fromJsObject(isolate, Local<Object>::Cast(handlerValue));
+    } else {
+        args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "Domain handler must be a function, object, buffer, or external matcher.", NewStringType::kNormal).ToLocalChecked())));
+        return;
+    }
+
+    domainRouter.add(std::string(pattern.getString()), handler);
 }
 
 /* Pass various undocumented configs */
@@ -441,6 +484,7 @@ PerContextData *Main(Local<Object> exports) {
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "setTimeout", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_setTimeout)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "clearTimeout", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_clearTimeout)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "arm", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_arm)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "routeDomain", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_routeDomain)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
 
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "_cfg", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_cfg)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "getParts", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_getParts)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();

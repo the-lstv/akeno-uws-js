@@ -18,9 +18,102 @@
 #include "App.h"
 #include <v8.h>
 #include "Utilities.h"
+#include "Router.h"
+#include <memory>
+#include <functional>
 using namespace v8;
 
+struct DomainHandler {
+    enum class Kind : uint8_t {
+        None,
+        PathMatcher,
+        JsFunction,
+        JsObject,
+        CppFunction,
+        StaticBuffer,
+        Custom
+    } kind = Kind::None;
 
+    std::shared_ptr<Akeno::PathMatcher<DomainHandler>> pathMatcher;
+    std::shared_ptr<v8::Global<v8::Function>> jsFunction;
+    std::shared_ptr<v8::Global<v8::Object>> jsObject;
+    std::shared_ptr<std::string> staticBuffer;
+    std::shared_ptr<std::function<void(void *, void *)>> cppFunction;
+    std::shared_ptr<void> customData;
+
+    static DomainHandler fromPathMatcher(std::shared_ptr<Akeno::PathMatcher<DomainHandler>> matcher) {
+        DomainHandler h;
+        h.kind = Kind::PathMatcher;
+        h.pathMatcher = std::move(matcher);
+        return h;
+    }
+
+    static DomainHandler fromPathMatcher(Akeno::PathMatcher<DomainHandler> *matcher) {
+        return fromPathMatcher(std::shared_ptr<Akeno::PathMatcher<DomainHandler>>(matcher, [](auto *) {}));
+    }
+
+    static DomainHandler fromJsFunction(Isolate *isolate, Local<Function> fn) {
+        DomainHandler h;
+        h.kind = Kind::JsFunction;
+        h.jsFunction = std::make_shared<v8::Global<v8::Function>>();
+        h.jsFunction->Reset(isolate, fn);
+        return h;
+    }
+
+    static DomainHandler fromJsObject(Isolate *isolate, Local<Object> obj) {
+        DomainHandler h;
+        h.kind = Kind::JsObject;
+        h.jsObject = std::make_shared<v8::Global<v8::Object>>();
+        h.jsObject->Reset(isolate, obj);
+        return h;
+    }
+
+    static DomainHandler fromStaticBuffer(std::string buffer) {
+        DomainHandler h;
+        h.kind = Kind::StaticBuffer;
+        h.staticBuffer = std::make_shared<std::string>(std::move(buffer));
+        return h;
+    }
+
+    static DomainHandler fromCppFunction(std::shared_ptr<std::function<void(void *, void *)>> fn) {
+        DomainHandler h;
+        h.kind = Kind::CppFunction;
+        h.cppFunction = std::move(fn);
+        return h;
+    }
+
+    static DomainHandler fromCustom(std::shared_ptr<void> data) {
+        DomainHandler h;
+        h.kind = Kind::Custom;
+        h.customData = std::move(data);
+        return h;
+    }
+
+    bool operator==(const DomainHandler &other) const noexcept {
+        if (kind != other.kind)
+            return false;
+        switch (kind) {
+            case Kind::None:
+                return true;
+            case Kind::PathMatcher:
+                return pathMatcher == other.pathMatcher;
+            case Kind::JsFunction:
+                return jsFunction == other.jsFunction;
+            case Kind::JsObject:
+                return jsObject == other.jsObject;
+            case Kind::CppFunction:
+                return cppFunction == other.cppFunction;
+            case Kind::StaticBuffer:
+                return staticBuffer == other.staticBuffer;
+            case Kind::Custom:
+                return customData == other.customData;
+        }
+        return false;
+    }
+};
+
+// int is just a placeholder here
+extern Akeno::DomainRouter<DomainHandler> domainRouter;
 
 /**
  * WARNING: the following code is a prototype and NOT production code.
@@ -66,6 +159,26 @@ struct ReqKeys {
 };
 
 ReqKeys& getReqKeys(v8::Isolate* isolate);
+
+constexpr size_t kDomainResolveMaxDepth = 8;
+
+inline const DomainHandler *resolveDomainHandler(const DomainHandler *handler, std::string_view path) {
+    const DomainHandler *current = handler;
+    size_t depth = 0;
+    while (current && current->kind == DomainHandler::Kind::PathMatcher) {
+        if (!current->pathMatcher) {
+            return nullptr;
+        }
+        current = current->pathMatcher->match(path);
+        if (!current) {
+            return nullptr;
+        }
+        if (++depth > kDomainResolveMaxDepth) {
+            return nullptr;
+        }
+    }
+    return current;
+}
 
 /* uWS.App.ws('/pattern', behavior) */
 template <typename APP>
@@ -540,6 +653,15 @@ void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
             url = req->getUrl();
         }
 
+        // At this point, we route the request based on domain.
+        // TODO: SNI routing for SSL, which is going to be more complex to implement
+        // But we could route early and predict the branch there
+        auto* domainMatch = domainRouter.match(domain);
+        if (!domainMatch) {
+            HttpResponseWrapper::sendErrorPage(res, "404");
+            return;
+        }
+
         // www redirect fast-path
         if (domain.size() >= 4 && domain.starts_with("www.")) {
             res->writeStatus("301 Moved Permanently");
@@ -556,9 +678,41 @@ void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
             return;
         }
 
+        const DomainHandler *resolved = resolveDomainHandler(domainMatch, url);
+        if (!resolved) {
+            HttpResponseWrapper::sendErrorPage(res, "404");
+            return;
+        }
+
+        if (resolved->kind == DomainHandler::Kind::StaticBuffer && resolved->staticBuffer) {
+            res->end(std::string_view(resolved->staticBuffer->data(), resolved->staticBuffer->size()));
+            return;
+        }
+
+        if (resolved->kind == DomainHandler::Kind::CppFunction && resolved->cppFunction) {
+            (*resolved->cppFunction)(res, req);
+            return;
+        }
+
         // At this point, we are handing to JS:
         Isolate *isolate = perContextData->isolate;
         HandleScope hs(isolate);
+
+        Local<Value> domainArg = Undefined(isolate);
+        bool hasDomainArg = false;
+        Local<Function> domainFunction;
+        bool callDomainFunction = false;
+
+        if (resolved->kind == DomainHandler::Kind::JsObject && resolved->jsObject) {
+            domainArg = Local<Object>::New(isolate, *resolved->jsObject);
+            hasDomainArg = true;
+        } else if (resolved->kind == DomainHandler::Kind::Custom && resolved->customData) {
+            domainArg = External::New(isolate, resolved->customData.get());
+            hasDomainArg = true;
+        } else if (resolved->kind == DomainHandler::Kind::JsFunction && resolved->jsFunction) {
+            domainFunction = Local<Function>::New(isolate, *resolved->jsFunction);
+            callDomainFunction = true;
+        }
 
         Local<Object> resObject, reqObject;
         Local<Context> context = isolate->GetCurrentContext();
@@ -616,8 +770,14 @@ void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
                 .Check();
         }
 
-        Local<Value> argv[] = {resObject, reqObject};
-        CallJS(isolate, cb.Get(isolate), 2, argv);
+        // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
+        // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
+        Local<Value> argv[] = {reqObject, resObject, domainArg};
+        if (callDomainFunction) {
+            CallJS(isolate, domainFunction, 2, argv);
+        } else {
+            CallJS(isolate, cb.Get(isolate), hasDomainArg ? 3 : 2, argv);
+        }
 
         /* Properly invalidate req */
         reqObject->SetAlignedPointerInInternalField(0, nullptr);
@@ -761,6 +921,7 @@ void uWS_App_domain(const FunctionCallbackInfo<Value> &args) {
 
     args.GetReturnValue().Set(args.This());
 }
+
 
 template <typename APP>
 void uWS_App_publish(const FunctionCallbackInfo<Value> &args) {

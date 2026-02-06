@@ -19,6 +19,8 @@
 #include "Utilities.h"
 
 #include <v8.h>
+#include <node_buffer.h>
+#include <type_traits>
 using namespace v8;
 
 thread_local int insideCorkCallback = 0;
@@ -26,6 +28,136 @@ thread_local int insideCorkCallback = 0;
 /* PROTOCOL is 0 = TCP, 1 = TLS, 2 = QUIC, 3 = CACHE */
 
 struct HttpResponseWrapper {
+
+    static inline constexpr std::string_view kDefaultErrorPageHead =
+        "<!DOCTYPE html><html><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:2rem;box-sizing:border-box;"
+        "background:#fff4f7;color:#90435b;--dark-color:#be7b90;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;"
+        "justify-content:center;align-items:center;text-align:center}"
+        "h2{margin:0 0 2rem;font-size:64px;font-weight:600;background:#ffdbe6;padding:8px 30px;border-radius:100px;font-family:monospace}"
+        "@media(prefers-color-scheme: dark){body{background:#1b1617;color:#ddb6c2;--dark-color:#726468}h2{background:#292122}}"
+        "p{margin:0;color:var(--dark-color)}"
+        "hr{border:none;height:1px;background:currentColor;opacity:.2;width:100%;max-width:300px;margin:2rem 0 1rem}"
+        "footer{font-size:.9rem;color:var(--dark-color)}a{color:inherit}"
+        "</style>";
+
+    static inline constexpr std::string_view kDefaultErrorPageTail =
+        "<hr><footer>Powered by <a href=\"https://github.com/the-lstv/akeno\" target=\"_blank\">Akeno/" AKENO_VERSION "</a></footer></html>";
+
+    static inline std::string errorPageHead = std::string(kDefaultErrorPageHead);
+    static inline std::string errorPageTail = std::string(kDefaultErrorPageTail);
+
+    static inline Local<Object> makeNodeBuffer(Isolate *isolate, std::string_view data) {
+        auto maybeBuffer = node::Buffer::Copy(isolate, data.data(), data.size());
+        if (maybeBuffer.IsEmpty()) {
+            return Object::New(isolate);
+        }
+        return maybeBuffer.ToLocalChecked();
+    }
+
+    static inline void setErrorPageBuffers(Isolate *isolate, Local<Object> target, std::string_view head, std::string_view tail) {
+        Local<Array> buffers = Array::New(isolate, 2);
+        buffers->Set(isolate->GetCurrentContext(), 0, makeNodeBuffer(isolate, head)).ToChecked();
+        buffers->Set(isolate->GetCurrentContext(), 1, makeNodeBuffer(isolate, tail)).ToChecked();
+        target->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "errorPageBuffers", NewStringType::kNormal).ToLocalChecked(), buffers).ToChecked();
+    }
+
+    static inline std::string toUtf8String(Isolate *isolate, const Local<Value> &value) {
+        String::Utf8Value utf8(isolate, value);
+        return std::string(*utf8, utf8.length());
+    }
+
+    static inline std::string defaultErrorMessageForStatus(std::string_view status) {
+        if (status.rfind("404", 0) == 0) {
+            return "The requested page could not be found on this server.";
+        }
+
+        if (status.rfind("200", 0) == 0) {
+            return "Wait, what?";
+        }
+
+        if (status.rfind("401", 0) == 0) {
+            return "You are not authorized to access this page.";
+        }
+
+        if (status.rfind("403", 0) == 0) {
+            return "You do not have permission to access this page.";
+        }
+
+        if (status.rfind("418", 0) == 0) {
+            return "The server is a teapot.";
+        }
+
+        return "Internal Server Error";
+    }
+
+    static inline void setDefaultErrorPage(std::string_view html) {
+        constexpr std::string_view placeholder = "{{message}}";
+        size_t pos = html.find(placeholder);
+
+        std::string_view head = html;
+        std::string_view tail = std::string_view();
+        if (pos != std::string_view::npos) {
+            head = html.substr(0, pos);
+            tail = html.substr(pos + placeholder.size());
+        }
+
+        errorPageHead.assign(head.data(), head.size());
+        errorPageTail.assign(tail.data(), tail.size());
+    }
+
+    template <typename Res>
+    static inline void sendErrorPage(Res *res, std::string_view status, std::string_view message = {}, std::string_view title = {}) {
+        if (!res) {
+            return;
+        }
+
+        std::string statusStr(status.empty() ? "500" : std::string(status));
+        if (statusStr.empty()) {
+            statusStr = "500";
+        }
+
+        std::string messageStr;
+        if (!message.empty()) {
+            messageStr.assign(message.data(), message.size());
+        } else {
+            messageStr = defaultErrorMessageForStatus(statusStr);
+        }
+
+        std::string titleStr;
+        if (!title.empty()) {
+            titleStr.assign(title.data(), title.size());
+        } else {
+            titleStr = statusStr.empty() ? "Internal Server Error" : statusStr;
+        }
+
+        std::string messageData;
+        messageData.reserve(titleStr.size() + messageStr.size() + 20);
+        messageData.append("<h2>");
+        messageData.append(titleStr);
+        messageData.append("</h2><p>");
+        messageData.append(messageStr);
+        messageData.append("</p>");
+
+        std::string_view headView = errorPageHead;
+        std::string_view tailView = errorPageTail;
+
+        if constexpr (std::is_same_v<Res, uWS::Http3Response>) {
+            res->writeStatus(statusStr);
+            res->writeHeader("Content-Type", "text/html");
+            res->write(headView);
+            res->write(messageData);
+            res->end(tailView);
+        } else {
+            res->cork([&]() {
+                res->writeStatus(statusStr);
+                res->writeHeader("Content-Type", "text/html");
+                res->write(headView);
+                res->write(messageData);
+                res->end(tailView);
+            });
+        }
+    }
 
     static void assumeCorked() {
         if (!insideCorkCallback) {
@@ -234,6 +366,113 @@ struct HttpResponseWrapper {
 
             args.GetReturnValue().Set(args.This());
         }
+    }
+
+    /* Takes string, returns this */
+    template <int PROTOCOL>
+    static void res_setDefaultErrorPage(const FunctionCallbackInfo<Value> &args) {
+        if (missingArguments(1, args)) {
+            return;
+        }
+
+        Isolate *isolate = args.GetIsolate();
+        NativeString html(isolate, args[0]);
+        if (html.isInvalid(args)) {
+            return;
+        }
+
+        constexpr std::string_view placeholder = "{{message}}";
+        std::string_view htmlView = html.getString();
+        size_t pos = htmlView.find(placeholder);
+
+        std::string_view head = htmlView;
+        std::string_view tail = std::string_view();
+        if (pos != std::string_view::npos) {
+            head = htmlView.substr(0, pos);
+            tail = htmlView.substr(pos + placeholder.size());
+        }
+
+        errorPageHead.assign(head.data(), head.size());
+        errorPageTail.assign(tail.data(), tail.size());
+
+        setErrorPageBuffers(isolate, args.This(), errorPageHead, errorPageTail);
+        args.GetReturnValue().Set(args.This());
+    }
+
+    /* Takes status, message, title. Returns this */
+    template <int PROTOCOL>
+    static void res_sendErrorPage(const FunctionCallbackInfo<Value> &args) {
+        auto *res = getHttpResponse<PROTOCOL>(args);
+        if (!res) {
+            return;
+        }
+
+        Isolate *isolate = args.GetIsolate();
+
+        std::string status = "500";
+        if (args.Length() >= 1 && !args[0]->IsUndefined() && !args[0]->IsNull()) {
+            status = toUtf8String(isolate, args[0]);
+        }
+
+        if (status.empty()) {
+            status = "500";
+        }
+
+        std::string message;
+        if (args.Length() >= 2 && !args[1]->IsUndefined() && !args[1]->IsNull()) {
+            message = toUtf8String(isolate, args[1]);
+        }
+
+        if (message.empty()) {
+            message = defaultErrorMessageForStatus(status);
+        }
+
+        std::string title;
+        if (args.Length() >= 3 && !args[2]->IsUndefined() && !args[2]->IsNull()) {
+            title = toUtf8String(isolate, args[2]);
+        }
+
+        if (title.empty()) {
+            title = status.empty() ? "Internal Server Error" : status;
+        }
+
+        std::string messageData;
+        messageData.reserve(title.size() + message.size() + 20);
+        messageData.append("<h2>");
+        messageData.append(title);
+        messageData.append("</h2><p>");
+        messageData.append(message);
+        messageData.append("</p>");
+
+        std::string_view headView = errorPageHead;
+        std::string_view tailView = errorPageTail;
+
+        size_t contentLength = headView.size() + tailView.size() + messageData.size();
+        // std::string contentLengthStr = std::to_string(contentLength);
+
+        // TODO: Use tryEnd rather than streaming
+
+        if constexpr (PROTOCOL == 2) {
+            res->writeStatus(status);
+            // res->writeHeader("Content-Length", contentLengthStr);
+            res->writeHeader("Content-Type", "text/html");
+            res->write(headView);
+            res->write(messageData);
+            invalidateResObject(args);
+            res->end(tailView);
+        } else {
+            res->cork([&]() {
+                res->writeStatus(status);
+                // res->writeHeader("Content-Length", contentLengthStr);
+                res->writeHeader("Content-Type", "text/html");
+                res->write(headView);
+                res->write(messageData);
+                invalidateResObject(args);
+                res->end(tailView);
+            });
+        }
+
+        args.GetReturnValue().Set(args.This());
     }
 
     /* Takes string or arraybuffer, returns this */
@@ -454,6 +693,8 @@ struct HttpResponseWrapper {
         
         /* Cache has almost nothing wrapped yet */
         if constexpr (SSL != 3) {
+            resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "setDefaultErrorPage", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_setDefaultErrorPage<SSL>));
+            resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "sendErrorPage", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_sendErrorPage<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "writeStatus", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_writeStatus<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "endWithoutBody", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_endWithoutBody<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "tryEnd", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_tryEnd<SSL>));
@@ -485,6 +726,10 @@ struct HttpResponseWrapper {
         
         /* Create our template */
         Local<Object> resObjectLocal = resTemplateLocal->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
+
+        if constexpr (SSL != 3) {
+            setErrorPageBuffers(isolate, resObjectLocal, errorPageHead, errorPageTail);
+        }
 
         return resObjectLocal;
     }

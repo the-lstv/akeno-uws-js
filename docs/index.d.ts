@@ -145,6 +145,15 @@ export interface HttpResponse {
     /** Ends this response, or tries to, by streaming appropriately sized chunks of body. Use in conjunction with onWritable. Returns tuple [ok, hasResponded].*/
     tryEnd(fullBodyOrChunk: RecognizedString, totalSize: number) : [boolean, boolean];
 
+    /** Holds the two HTML buffers used by sendErrorPage. */
+    errorPageBuffers: [Buffer, Buffer];
+
+    /** Sets the default error page template with a {{message}} placeholder. */
+    setDefaultErrorPage(html: RecognizedString) : HttpResponse;
+
+    /** Sends a default error page response with status and message. */
+    sendErrorPage(status?: RecognizedString | number, message?: RecognizedString, title?: RecognizedString | null) : HttpResponse;
+
     /** Immediately force closes the connection. Any onAborted callback will run. */
     close() : HttpResponse;
 

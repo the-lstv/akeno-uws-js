@@ -21,6 +21,8 @@ const char *ARM = "arm";
 const char *ARM64 = "arm64";
 const char *X64 = "x64";
 
+int addon_only = 0;
+
 /* System, but with string replace */
 int run(const char *cmd, ...) {
     char buf[2048];
@@ -120,6 +122,10 @@ void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const
         run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
         run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
         run("%s -pthread -flto -O3 *.o uWebSockets/uSockets/boringssl/%s/ssl/libssl.a uWebSockets/uSockets/boringssl/%s/crypto/libcrypto.a uWebSockets/uSockets/lsquic/%s/src/liblsquic/liblsquic.a -std=c++20 -shared %s -o dist/uws_%s_%s_%s.node", cpp_compiler, arch, arch, arch, cpp_linker, os, arch, versions[i].abi);
+
+        if(addon_only) {
+            break; // Only build for one version
+        }
     }
 }
 
@@ -144,9 +150,17 @@ void build_windows(char *compiler, char *cpp_compiler, char *cpp_linker, char *o
     }
 }
 
-int main() {
-    printf("[Preparing]\n");
-    prepare();
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--addon-only")) {
+            addon_only = 1;
+        }
+    }
+
+    if (!addon_only) {
+        printf("[Preparing]\n");
+        prepare();
+    }
     printf("\n[Building]\n");
     
     const char *arch = X64;
@@ -159,14 +173,18 @@ int main() {
 
 #ifdef IS_MACOS
     /* If we are macOS, build both arm64 and x64 */
-    build_boringssl(X64);
-    build_boringssl(ARM64);
-    build_lsquic(X64);
-    build_lsquic(ARM64);
+    if (!addon_only) {
+        build_boringssl(X64);
+        build_boringssl(ARM64);
+        build_lsquic(X64);
+        build_lsquic(ARM64);
+    }
 #else
     /* For other platforms we simply compile the host */
-    build_boringssl(arch);
-    build_lsquic(arch);
+    if (!addon_only) {
+        build_boringssl(arch);
+        build_lsquic(arch);
+    }
 #endif
 
 
