@@ -40,6 +40,12 @@ using namespace v8;
 
 Akeno::DomainRouter<DomainHandler> domainRouter;
 
+// Windows is crap
+#ifdef _MSC_VER
+#define _CRT_NONSTDC_NO_DEPRECATE
+#define _CRT_SECURE_NO_WARNINGS // Doesn't work anyway, still complains
+#endif
+
 /* Todo: Apps should be freed once the GC says so BUT ALWAYS before freeing the loop */
 
 /* Definition of getReqKeys needed by AppWrapper.h */
@@ -483,6 +489,12 @@ PerContextData *Main(Local<Object> exports) {
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "DEDICATED_DECOMPRESSOR_2KB", NewStringType::kNormal).ToLocalChecked(), Integer::NewFromUnsigned(isolate, uWS::DEDICATED_DECOMPRESSOR_2KB)).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "DEDICATED_DECOMPRESSOR_1KB", NewStringType::kNormal).ToLocalChecked(), Integer::NewFromUnsigned(isolate, uWS::DEDICATED_DECOMPRESSOR_1KB)).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "DEDICATED_DECOMPRESSOR_512B", NewStringType::kNormal).ToLocalChecked(), Integer::NewFromUnsigned(isolate, uWS::DEDICATED_DECOMPRESSOR_512B)).ToChecked();
+
+    // This is a custom build for Akeno
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "isAkeno", NewStringType::kNormal).ToLocalChecked(), Boolean::New(isolate, true)).ToChecked();
+
+    // Which Akeno version we are compatible with, it can be any valid Units.Version comparator (eg. >=1.2.3, etc.)
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "akenoCompatibility", NewStringType::kNormal).ToLocalChecked(), String::NewFromUtf8(isolate, AKENO_VERSION, NewStringType::kNormal).ToLocalChecked()).ToChecked();
 
     /* Listen options */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "LIBUS_LISTEN_EXCLUSIVE_PORT", NewStringType::kNormal).ToLocalChecked(), Integer::NewFromUnsigned(isolate, LIBUS_LISTEN_EXCLUSIVE_PORT)).ToChecked();

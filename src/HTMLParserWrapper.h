@@ -399,10 +399,8 @@ static void Akeno_HTMLParser_context_import(const FunctionCallbackInfo<Value> &a
     String::Utf8Value path(isolate, args[0]);
     std::string filePath(*path ? *path : "", path.length());
 
-    try {
-        parser->ctx.inlineFile(filePath);
-    } catch (const std::runtime_error &e) {
-        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, e.what(), NewStringType::kNormal).ToLocalChecked()));
+    if (!parser->ctx.inlineFile(filePath)) {
+        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, parser->ctx.lastError.c_str(), NewStringType::kNormal).ToLocalChecked()));
     }
 }
 
@@ -465,13 +463,11 @@ static void Akeno_HTMLParser_fromStringInternal(const FunctionCallbackInfo<Value
 
     parser->ctx.in_markdown = isMarkdown;
 
-    try {
-        parser->ctx.write(source, &result, &userData);
-        parser->ctx.end();
-    } catch (const std::exception &e) {
-        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, e.what(), NewStringType::kNormal).ToLocalChecked()));
+    if (!parser->ctx.write(source, &result, &userData)) {
+        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, parser->ctx.lastError.c_str(), NewStringType::kNormal).ToLocalChecked()));
         return;
     }
+    parser->ctx.end();
 
     auto maybeBuffer = node::Buffer::Copy(isolate, result.data(), result.size());
     if (maybeBuffer.IsEmpty()) {
@@ -519,10 +515,9 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
     HTMLParserUserData userData(isolate, ctxObject);
     Akeno::FileCache *cache = nullptr;
 
-    try {
-        cache = &parser->ctx.fromFile(filePath, &userData, appPath);
-    } catch (const std::exception &e) {
-        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, e.what(), NewStringType::kNormal).ToLocalChecked()));
+    cache = parser->ctx.fromFile(filePath, &userData, appPath);
+    if (!cache) {
+        isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, parser->ctx.lastError.c_str(), NewStringType::kNormal).ToLocalChecked()));
         return;
     }
 
