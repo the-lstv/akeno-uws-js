@@ -25,7 +25,7 @@ using namespace v8;
 #include <sstream>
 #include <fstream>
 
-#include "App.h"
+#include "akeno/App.h"
 
 // We load features from the addon
 extern void Main(Local<Object> exports);

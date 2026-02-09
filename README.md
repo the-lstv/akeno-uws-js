@@ -2,7 +2,7 @@
   <img src="https://github.com/user-attachments/assets/a742cb99-7423-4be7-8e2c-f12b8324fae7" width="900"/>
 </p>
 
-# Akeno-uWS
+# Akeno-uWS.js
 This repository is for the fork of µWebSockets.js used by [Akeno](https://github.com/the-lstv/akeno), used for building and including the µWebSockets as a module.
 It moves a bunch of the JavaScript logic to C++ for slightly better performance (though it's not an enormous difference), eliminate calls to JavaScript where possible, and for the future low level cache implementation.
 
@@ -41,3 +41,6 @@ On Windows you may need to do a bunch of extra steps based on your environment, 
 Please keep in mind that this repository contains code with different licences:
 Code from µWebSockets.js is licensed under the Apache License 2.0, and some code originating from Akeno authors is licensed under the GNU General Public License v3.0 (since the Akeno project itself is licensed under GPLv3).
 Thus the resulting binaries are also licensed under GPLv3.
+
+> [!NOTE]
+> All issues/PRs should go to the [main Akeno repository](https://github.com/the-lstv/akeno).

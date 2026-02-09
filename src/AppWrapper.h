@@ -2,6 +2,8 @@
  * Authored by Alex Hultman, 2018-2021.
  * Intellectual property of third-party.
 
+ * Modified for Akeno: copyright (c) 2026 Lukas Zloch (https://lstv.space)
+
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -15,114 +17,19 @@
  * limitations under the License.
  */
 
-#include "App.h"
+#include "akeno/DomainHandler.h"
+#include "akeno/App.h"
 #include <v8.h>
 #include "Utilities.h"
-#include "Router.h"
 #include <memory>
 #include <functional>
 using namespace v8;
 
-struct DomainHandler {
-    enum class Kind : uint8_t {
-        None,
-        PathMatcher,
-        JsFunction,
-        JsObject,
-        CppFunction,
-        StaticBuffer,
-        Custom
-    } kind = Kind::None;
-
-    std::shared_ptr<Akeno::PathMatcher<DomainHandler>> pathMatcher;
-    std::shared_ptr<v8::Global<v8::Function>> jsFunction;
-    std::shared_ptr<v8::Global<v8::Object>> jsObject;
-    std::shared_ptr<std::string> staticBuffer;
-    std::shared_ptr<std::function<void(void *, void *)>> cppFunction;
-    std::shared_ptr<void> customData;
-
-    static DomainHandler fromPathMatcher(std::shared_ptr<Akeno::PathMatcher<DomainHandler>> matcher) {
-        DomainHandler h;
-        h.kind = Kind::PathMatcher;
-        h.pathMatcher = std::move(matcher);
-        return h;
-    }
-
-    static DomainHandler fromPathMatcher(Akeno::PathMatcher<DomainHandler> *matcher) {
-        return fromPathMatcher(std::shared_ptr<Akeno::PathMatcher<DomainHandler>>(matcher, [](auto *) {}));
-    }
-
-    static DomainHandler fromJsFunction(Isolate *isolate, Local<Function> fn) {
-        DomainHandler h;
-        h.kind = Kind::JsFunction;
-        h.jsFunction = std::make_shared<v8::Global<v8::Function>>();
-        h.jsFunction->Reset(isolate, fn);
-        return h;
-    }
-
-    static DomainHandler fromJsObject(Isolate *isolate, Local<Object> obj) {
-        DomainHandler h;
-        h.kind = Kind::JsObject;
-        h.jsObject = std::make_shared<v8::Global<v8::Object>>();
-        h.jsObject->Reset(isolate, obj);
-        return h;
-    }
-
-    static DomainHandler fromStaticBuffer(std::string buffer) {
-        DomainHandler h;
-        h.kind = Kind::StaticBuffer;
-        h.staticBuffer = std::make_shared<std::string>(std::move(buffer));
-        return h;
-    }
-
-    static DomainHandler fromCppFunction(std::shared_ptr<std::function<void(void *, void *)>> fn) {
-        DomainHandler h;
-        h.kind = Kind::CppFunction;
-        h.cppFunction = std::move(fn);
-        return h;
-    }
-
-    static DomainHandler fromCustom(std::shared_ptr<void> data) {
-        DomainHandler h;
-        h.kind = Kind::Custom;
-        h.customData = std::move(data);
-        return h;
-    }
-
-    bool operator==(const DomainHandler &other) const noexcept {
-        if (kind != other.kind)
-            return false;
-        switch (kind) {
-            case Kind::None:
-                return true;
-            case Kind::PathMatcher:
-                return pathMatcher == other.pathMatcher;
-            case Kind::JsFunction:
-                return jsFunction == other.jsFunction;
-            case Kind::JsObject:
-                return jsObject == other.jsObject;
-            case Kind::CppFunction:
-                return cppFunction == other.cppFunction;
-            case Kind::StaticBuffer:
-                return staticBuffer == other.staticBuffer;
-            case Kind::Custom:
-                return customData == other.customData;
-        }
-        return false;
-    }
-};
-
-// int is just a placeholder here
-extern Akeno::DomainRouter<DomainHandler> domainRouter;
-
 /**
- * WARNING: the following code is a prototype and NOT production code.
- * It's really slow and low-quality at this moment;
- * I am just looking for ways to bring the routing logic to C++, so C++ cache can be implemented,
- * there are less JS<->C++ calls, and multithreading is easier (currently quite hard as all apps go through one JS handler, which is not ideal).
+ * WARNING: the following code is mostly still a prototype.
  */
 
-/* Helper for resolve() logic (not prod. ready) */
+/* Helper for query decoding for resolve() logic, when needed */
 std::string decodeURIComponent(std::string_view url) {
     std::string decoded;
     decoded.reserve(url.length());
@@ -160,772 +67,186 @@ struct ReqKeys {
 
 ReqKeys& getReqKeys(v8::Isolate* isolate);
 
-constexpr size_t kDomainResolveMaxDepth = 8;
+/* App wrapper functions — protocol-agnostic */
 
-inline const DomainHandler *resolveDomainHandler(const DomainHandler *handler, std::string_view path) {
-    const DomainHandler *current = handler;
-    size_t depth = 0;
-    while (current && current->kind == DomainHandler::Kind::PathMatcher) {
-        if (!current->pathMatcher) {
-            return nullptr;
-        }
-        current = current->pathMatcher->match(path);
-        if (!current) {
-            return nullptr;
-        }
-        if (++depth > kDomainResolveMaxDepth) {
-            return nullptr;
-        }
-    }
-    return current;
-}
+/* app.route(pattern, handler) — adds a domain route. */
+void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
+    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
-/* uWS.App.ws('/pattern', behavior) */
-template <typename APP>
-void uWS_App_ws(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
 
-    /* pattern, behavior */
+    /* pattern, handler */
     if (missingArguments(2, args)) {
         return;
     }
 
-    Isolate *isolate = args.GetIsolate();
-
-    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-    /* This one is default constructed with defaults */
-    typename APP::template WebSocketBehavior<PerSocketData> behavior = {};
-
-    NativeString pattern(args.GetIsolate(), args[0]);
+    NativeString pattern(isolate, args[0]);
     if (pattern.isInvalid(args)) {
         return;
     }
 
-    UniquePersistent<Function> upgradePf;
-    UniquePersistent<Function> openPf;
-    UniquePersistent<Function> messagePf;
-    UniquePersistent<Function> drainPf;
-    UniquePersistent<Function> closePf;
-    UniquePersistent<Function> droppedPf;
-    UniquePersistent<Function> pingPf;
-    UniquePersistent<Function> pongPf;
-    UniquePersistent<Function> subscriptionPf;
+    std::string patternStr(pattern.getString());
 
-    /* Get the behavior object */
-    if (args.Length() == 2) {
-        Local<Object> behaviorObject = Local<Object>::Cast(args[1]);
-
-        /* maxPayloadLength or default */
-        MaybeLocal<Value> maybeMaxPayloadLength = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxPayloadLength", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeMaxPayloadLength.IsEmpty() && !maybeMaxPayloadLength.ToLocalChecked()->IsUndefined()) {
-            behavior.maxPayloadLength = maybeMaxPayloadLength.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* idleTimeout or default */
-        MaybeLocal<Value> maybeIdleTimeout = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "idleTimeout", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeIdleTimeout.IsEmpty() && !maybeIdleTimeout.ToLocalChecked()->IsUndefined()) {
-            behavior.idleTimeout = maybeIdleTimeout.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* maxLifetime or default */
-        MaybeLocal<Value> maybeMaxLifetime = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxLifetime", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeMaxLifetime.IsEmpty() && !maybeMaxLifetime.ToLocalChecked()->IsUndefined()) {
-            behavior.maxLifetime = maybeMaxLifetime.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* closeOnBackpressureLimit or default */
-        MaybeLocal<Value> maybeCloseOnBackpressureLimit = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "closeOnBackpressureLimit", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeCloseOnBackpressureLimit.IsEmpty() && !maybeCloseOnBackpressureLimit.ToLocalChecked()->IsUndefined()) {
-            behavior.closeOnBackpressureLimit = maybeCloseOnBackpressureLimit.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* sendPingsAutomatically or default */
-        MaybeLocal<Value> maybeSendPingsAutomatically = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "sendPingsAutomatically", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeSendPingsAutomatically.IsEmpty() && !maybeSendPingsAutomatically.ToLocalChecked()->IsUndefined()) {
-            behavior.sendPingsAutomatically = maybeSendPingsAutomatically.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* Compression or default, map from 0, 1, 2 to disabled, shared, dedicated. This is actually the enum */
-        MaybeLocal<Value> maybeCompression = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "compression", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeCompression.IsEmpty() && !maybeCompression.ToLocalChecked()->IsUndefined()) {
-            behavior.compression = (uWS::CompressOptions) maybeCompression.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* maxBackpressure or default */
-        MaybeLocal<Value> maybeMaxBackpressure = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxBackpressure", NewStringType::kNormal).ToLocalChecked());
-        if (!maybeMaxBackpressure.IsEmpty() && !maybeMaxBackpressure.ToLocalChecked()->IsUndefined()) {
-            behavior.maxBackpressure = maybeMaxBackpressure.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        }
-
-        /* Upgrade */
-        upgradePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "upgrade", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Open */
-        openPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "open", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Message */
-        messagePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "message", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Drain */
-        drainPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "drain", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Close */
-        closePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "close", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Dropped */
-        droppedPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "dropped", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Ping */
-        pingPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "ping", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-        /* Pong */
-        pongPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "pong", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-    	/* Subscription */
-        subscriptionPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "subscription", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
-
+    /* If the handler is null, unroute */
+    if (args[1]->IsNull() || args[1]->IsUndefined()) {
+        app->unroute(patternStr);
+        args.GetReturnValue().Set(args.This());
+        return;
     }
 
-    /* Upgrade handler is always optional */
-    if (upgradePf != Undefined(isolate)) {
-        behavior.upgrade = [upgradePf = std::move(upgradePf), perContextData](auto *res, auto *req, auto *context) {
+    DomainHandler handler;
+
+    // TODO: Support DeclarativeResponse
+    if (args[1]->IsArrayBuffer()) {
+        NativeString staticBuf(isolate, args[1]);
+        if (staticBuf.isInvalid(args)) {
+            return;
+        }
+
+        handler = DomainHandler::fromStaticBuffer(std::string(staticBuf.getString()));
+
+        app->route(patternStr, std::move(handler));
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    if (args[1]->IsFunction()) {
+        Callback checkedCallback(args.GetIsolate(), args[1]);
+        if (checkedCallback.isInvalid(args)) return;
+
+        Global<Function> cb = checkedCallback.getFunction();
+
+        /* This function requires perContextData */
+        auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+        // TODO: Optimize calls
+
+        handler = DomainHandler::onRequest([cb = std::move(cb), perContextData](auto *res, auto *req) {
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
+            Local<Context> context = isolate->GetCurrentContext();
 
-            // TODO:
-            // if (resolve<APP>(perContextData, res, req, resObject, reqObject)) return;
-
-            Local<Function> upgradeLf = Local<Function>::New(isolate, upgradePf);
-            Local<Object> resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
-            resObject->SetAlignedPointerInInternalField(0, res);
-
-            Local<Object> reqObject = perContextData->reqTemplate[std::is_same<APP, uWS::H3App>::value].Get(isolate)->Clone();
+            Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
             reqObject->SetAlignedPointerInInternalField(0, req);
 
-            Local<Value> argv[3] = {resObject, reqObject, External::New(isolate, (void *) context)};
-            CallJS(isolate, upgradeLf, 3, argv);
+            Local<Object> resObject = perContextData->resTemplate[0].Get(isolate)->Clone();
+            resObject->SetAlignedPointerInInternalField(0, res);
 
-            /* Properly invalidate req */
-            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            Local<Value> domainArg = Undefined(isolate);
+            bool hasDomainArg = false;
+            Local<Function> domainFunction;
+            bool callDomainFunction = false;
 
-            /* µWS itself will terminate if not responded and not attached
-            * onAborted handler, so we can assume it's done */
-        };
-    }
+            // if (resolved->kind == DomainHandler::Kind::JsObject && resolved->jsObject) {
+            //     domainArg = Local<Object>::New(isolate, *resolved->jsObject);
+            //     hasDomainArg = true;
+            // } else if (resolved->kind == DomainHandler::Kind::Custom && resolved->customData) {
+            //     domainArg = External::New(isolate, resolved->customData.get());
+            //     hasDomainArg = true;
+            // }
 
-    /* Open handler is NOT optional for the wrapper */
-    behavior.open = [openPf = std::move(openPf), perContextData](auto *ws) {
-        Isolate *isolate = perContextData->isolate;
-        HandleScope hs(isolate);
+            // TODO:FIXME: Stop doing this
+            // Temporary solution until I stabilize things
 
-        /* Create a new websocket object */
-        Local<Object> wsObject = perContextData->wsTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
-        wsObject->SetAlignedPointerInInternalField(0, ws);
-
-        /* Retrieve temporary userData object */
-        PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-
-        /* Copy entires from userData, only if we have it set (not the case for default constructor) */
-        if (!perSocketData->socketPf.IsEmpty()) {
-            /* socketPf points to a stack allocated UniquePersistent, or nullptr, at this point */
-            Local<Object> userData = Local<Object>::New(isolate, perSocketData->socketPf);
-
-            /* Merge userData and wsObject; this code is exceedingly horrible */
-            Local<Array> keys;
-            if (userData->GetOwnPropertyNames(isolate->GetCurrentContext()).ToLocal(&keys)) {
-                for (int i = 0; i < keys->Length(); i++) {
-                    wsObject->Set(isolate->GetCurrentContext(),
-                        keys->Get(isolate->GetCurrentContext(), i).ToLocalChecked(),
-                        userData->Get(isolate->GetCurrentContext(), keys->Get(isolate->GetCurrentContext(), i).ToLocalChecked()).ToLocalChecked()
-                        ).ToChecked();
-                }
+            std::string_view method = req->getMethod();
+            std::string_view url = req->getUrl();
+            std::string_view host = req->getHeader("host");
+            std::string_view domain = host;
+            size_t colonPos = host.find(':');
+            if (colonPos != std::string_view::npos) {
+                domain = host.substr(0, colonPos);
             }
-        }
 
-        /* Attach a new V8 object with pointer to us, to it */
-        perSocketData->socketPf.Reset(isolate, wsObject);
+            ReqKeys &keys = getReqKeys(isolate);
 
-        Local<Function> openLf = Local<Function>::New(isolate, openPf);
-        if (!openLf->IsUndefined()) {
-            Local<Value> argv[] = {wsObject};
-            CallJS(isolate, openLf, 1, argv);
-        }
-    };
+            reqObject->Set(context, keys.method.Get(isolate),
+                        oneByte(isolate, method)).Check();
 
-    /* Message handler is always optional */
-    if (messagePf != Undefined(isolate)) {
-        behavior.message = [messagePf = std::move(messagePf), isolate](auto *ws, std::string_view message, uWS::OpCode opCode) {
-            HandleScope hs(isolate);
+            std::string_view origin = req->getHeader("origin");
+            reqObject->Set(context, keys.origin.Get(isolate),
+                        oneByte(isolate, origin)).Check();
 
-            Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
+            reqObject->Set(context, keys.secure.Get(isolate),
+                        Boolean::New(isolate, 0/*TODO*/)).Check();
 
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[3] = {Local<Object>::New(isolate, perSocketData->socketPf),
-                                    messageArrayBuffer,
-                                    Boolean::New(isolate, opCode == uWS::OpCode::BINARY)};
+            reqObject->Set(context, keys.host.Get(isolate),
+                        oneByte(isolate, host)).Check();
 
-            CallJS(isolate, Local<Function>::New(isolate, messagePf), 3, argv);
+            reqObject->Set(context, keys.domain.Get(isolate),
+                        oneByte(isolate, domain)).Check();
 
-            /* Important: we clear the ArrayBuffer to make sure it is not invalidly used after return */
-            messageArrayBuffer->Detach();
-        };
-    }
-
-    /* Dropped handler is always optional (similar to message) */
-    if (droppedPf != Undefined(isolate)) {
-        behavior.dropped = [droppedPf = std::move(droppedPf), isolate](auto *ws, std::string_view message, uWS::OpCode opCode) {
-            HandleScope hs(isolate);
-
-            Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
-
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[3] = {Local<Object>::New(isolate, perSocketData->socketPf),
-                                    messageArrayBuffer,
-                                    Boolean::New(isolate, opCode == uWS::OpCode::BINARY)};
-
-            CallJS(isolate, Local<Function>::New(isolate, droppedPf), 3, argv);
-
-            /* Important: we clear the ArrayBuffer to make sure it is not invalidly used after return */
-            messageArrayBuffer->Detach();
-        };
-    }
-
-    /* Drain handler is always optional */
-    if (drainPf != Undefined(isolate)) {
-        behavior.drain = [drainPf = std::move(drainPf), isolate](auto *ws) {
-            HandleScope hs(isolate);
-
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[1] = {Local<Object>::New(isolate, perSocketData->socketPf)
-                                    };
-            CallJS(isolate, Local<Function>::New(isolate, drainPf), 1, argv);
-        };
-    }
-
-    /* Subscription handler is always optional */
-    if (subscriptionPf != Undefined(isolate)) {
-        behavior.subscription = [subscriptionPf = std::move(subscriptionPf), isolate](auto *ws, std::string_view topic, int newCount, int oldCount) {
-            HandleScope hs(isolate);
-
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[4] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) topic.data(), topic.length()), Integer::New(isolate, newCount), Integer::New(isolate, oldCount)};
-            CallJS(isolate, Local<Function>::New(isolate, subscriptionPf), 4, argv);
-        };
-    }
-
-    /* Ping handler is always optional */
-    if (pingPf != Undefined(isolate)) {
-        behavior.ping = [pingPf = std::move(pingPf), isolate](auto *ws, std::string_view message) {
-            HandleScope hs(isolate);
-
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[2] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) message.data(), message.length())};
-            CallJS(isolate, Local<Function>::New(isolate, pingPf), 2, argv);
-        };
-    }
-
-    /* Pong handler is always optional */
-    if (pongPf != Undefined(isolate)) {
-        behavior.pong = [pongPf = std::move(pongPf), isolate](auto *ws, std::string_view message) {
-            HandleScope hs(isolate);
-
-            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-            Local<Value> argv[2] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) message.data(), message.length())};
-            CallJS(isolate, Local<Function>::New(isolate, pongPf), 2, argv);
-        };
-    }
-
-    /* Close handler is NOT optional for the wrapper */
-    behavior.close = [closePf = std::move(closePf), isolate](auto *ws, int code, std::string_view message) {
-        HandleScope hs(isolate);
-
-        Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
-        PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
-        Local<Object> wsObject = Local<Object>::New(isolate, perSocketData->socketPf);
-
-        /* Invalidate this wsObject */
-        wsObject->SetAlignedPointerInInternalField(0, nullptr);
-
-        /* Only call close handler if we have one set */
-        Local<Function> closeLf = Local<Function>::New(isolate, closePf);
-        if (!closeLf->IsUndefined()) {
-            Local<Value> argv[3] = {wsObject, Integer::New(isolate, code), messageArrayBuffer};
-            CallJS(isolate, closeLf, 3, argv);
-        }
-
-        /* This should technically not be required */
-        perSocketData->socketPf.Reset();
-
-        /* Again, here we clear the buffer to avoid strange bugs */
-        messageArrayBuffer->Detach();
-    };
-
-    app->template ws<PerSocketData>(std::string(pattern.getString()), std::move(behavior));
-
-    /* Return this */
-    args.GetReturnValue().Set(args.This());
-}
-
-/* This method wraps get, post and all http methods */
-template <typename APP, typename F>
-void uWS_App_get(F f, const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
-    /* Pattern */
-    NativeString pattern(args.GetIsolate(), args[0]);
-    if (pattern.isInvalid(args)) {
-        return;
-    }
-
-    /* If the handler is null */
-    if (args[1]->IsNull()) {
-        (app->*f)(std::string(pattern.getString()), nullptr);
-        args.GetReturnValue().Set(args.This());
-        return;
-    }
-
-    /* If the handler is String */
-    if (args[1]->IsArrayBuffer()) {
-        NativeString constantString(args.GetIsolate(), args[1]);
-        if (constantString.isInvalid(args)) {
-            return;
-        }
-
-        (app->*f)(std::string(pattern.getString()), [response = std::string(constantString.getString().data(), constantString.getString().length())](auto *res, auto *req) {
-            
-
-            if constexpr (!std::is_same<APP, uWS::H3App>::value) {
-
-                /* Parse the DeclarativeResponse */
-                std::string_view remainingInstructions(response.data(), response.length());
-                while (remainingInstructions.length()) {
-                    switch(remainingInstructions[0]) {
-                        case 0: {
-                            /* opCode END */
-                            uint16_t length;
-                            memcpy(&length, remainingInstructions.data() + 1, 2);
-                            remainingInstructions.remove_prefix(3); // Skip opCode and length bytes
-                            
-                            res->end(remainingInstructions.substr(0, length));
-                            remainingInstructions.remove_prefix(length);
-                        }
-                        break;
-                        case 1: {
-                            /* opCode WRITE_HEADER */
-                            uint8_t keyLength;
-                            memcpy(&keyLength, remainingInstructions.data() + 1, 1);
-                            remainingInstructions.remove_prefix(2); // Skip opCode and key length bytes
-                            
-                            std::string_view keyString(remainingInstructions.data(), keyLength);
-                            remainingInstructions.remove_prefix(keyLength);
-
-                            uint8_t valueLength;
-                            memcpy(&valueLength, remainingInstructions.data(), 1);
-                            remainingInstructions.remove_prefix(1); // Skip value length bytes
-                            
-                            std::string_view valueString(remainingInstructions.data(), valueLength);
-                            remainingInstructions.remove_prefix(valueLength);
-
-                            res->writeHeader(keyString, valueString);
-                        }
-                        break;
-                        case 2: {
-                            /* opCode WRITE_BODY */
-                            remainingInstructions.remove_prefix(1); // Skip opCode
-                            //res->writeBody();
-                        }
-                        break;
-                        case 3: {
-                            /* opCode WRITE_QUERY_VALUE */
-                            uint8_t keyLength;
-                            memcpy(&keyLength, remainingInstructions.data() + 1, 1);
-                            remainingInstructions.remove_prefix(2); // Skip opCode and key length bytes
-                            
-                            std::string_view keyString(remainingInstructions.data(), keyLength);
-                            remainingInstructions.remove_prefix(keyLength);
-
-                            res->write(req->getQuery(keyString));
-                        }
-                        break;
-                        case 4: {
-                            /* opCode WRITE_HEADER_VALUE */
-                            uint8_t keyLength;
-                            memcpy(&keyLength, remainingInstructions.data() + 1, 1);
-                            remainingInstructions.remove_prefix(2); // Skip opCode and key length bytes
-                            
-                            std::string_view keyString(remainingInstructions.data(), keyLength);
-                            remainingInstructions.remove_prefix(keyLength);
-
-                            res->write(req->getHeader(keyString));
-                        }
-                        break;
-                        case 5: {
-                            /* opCode WRITE */
-                            uint16_t length;
-                            memcpy(&length, remainingInstructions.data() + 1, 2);
-                            remainingInstructions.remove_prefix(3); // Skip opCode and length bytes
-                            
-                            std::string_view valueString(remainingInstructions.data(), length);
-                            remainingInstructions.remove_prefix(length);
-
-                            res->write(valueString);
-                        }
-                        break;
-                        case 6: {
-                            /* opCode WRITE_PARAMETER_VALUE */
-                            uint8_t keyLength;
-                            memcpy(&keyLength, remainingInstructions.data() + 1, 1);
-                            remainingInstructions.remove_prefix(2); // Skip opCode and key length bytes
-                            
-                            std::string_view keyString(remainingInstructions.data(), keyLength);
-                            remainingInstructions.remove_prefix(keyLength);
-
-                            res->write(req->getParameter(keyString));
-                        }
-                        break;
-                    }
-                }
-
-            }
-            
-
-        });
-
-        args.GetReturnValue().Set(args.This());
-        return;
-    }
-
-    /* Handler */
-    Callback checkedCallback(args.GetIsolate(), args[1]);
-    if (checkedCallback.isInvalid(args)) {
-        return;
-    }
-    UniquePersistent<Function> cb = checkedCallback.getFunction();
-
-    /* This function requires perContextData */
-    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-
-    (app->*f)(std::string(pattern.getString()), [cb = std::move(cb), perContextData](auto *res, auto *req) {
-        // ! TODO: Move this
-
-        std::string_view method;
-        if constexpr (std::is_same<APP, uWS::H3App>::value) {
-            method = req->getHeader(":method");
-        } else {
-            method = req->getCaseSensitiveMethod();
-        }
-
-        // OPTIONS fast-path
-        // IMPORTANT TODO: More flexible CORS handling, though I don't know how to approach this yet.
-        if (method == "OPTIONS") {
-            res->writeHeader("Access-Control-Allow-Origin", "*");
-            res->writeHeader("Access-Control-Allow-Methods",
-                            "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
-            res->writeHeader("Access-Control-Allow-Headers",
-                            "Content-Type, Authorization");
-            res->writeHeader("Cache-Control", "max-age=1382400");
-            res->writeHeader("Access-Control-Max-Age", "1382400");
-            res->end();
-            return;
-        }
-
-        std::string_view host = req->getHeader("host");
-        if constexpr (std::is_same<APP, uWS::H3App>::value) {
-            if (host.empty()) {
-                host = req->getHeader(":authority");
-            }
-        }
-
-        if (host.empty())
-            host = "";
-
-        std::string_view domain = host;
-        if (!host.empty()) {
-            if (host.front() == '[') {
-                // IPv6 literal: [::1]:443
-                auto end = host.find(']');
-                if (end != std::string_view::npos)
-                    domain = host.substr(0, end + 1);
+            // Decode only if needed
+            if (url.find('%') != std::string_view::npos) {
+                std::string decoded = decodeURIComponent(url);
+                reqObject->Set(context, keys.path.Get(isolate),
+                            oneByte(isolate, decoded))
+                    .Check();
             } else {
-                auto colon = host.rfind(':');
-                if (colon != std::string_view::npos)
-                    domain = host.substr(0, colon);
+                reqObject->Set(context, keys.path.Get(isolate),
+                            oneByte(isolate, url))
+                    .Check();
             }
-        }
 
-        std::string_view url;
-        if constexpr (std::is_same<APP, uWS::H3App>::value) {
-            url = req->getHeader(":path");
-        } else {
-            url = req->getUrl();
-        }
+            // Methods that are likely to have a body
+            // MAYBE TODO: We could use an ENUM for methods instead, and expose something like backend.METHOD_GET in JS
+            if (method == "POST" ||
+                method == "PUT" ||
+                method == "PATCH" ||
+                method == "DELETE") {
+                std::string_view ct = req->getHeader("content-type");
+                reqObject->Set(context, keys.contentType.Get(isolate),
+                            oneByte(isolate, ct))
+                    .Check();
 
-        // At this point, we route the request based on domain.
-        // TODO: SNI routing for SSL, which is going to be more complex to implement
-        // But we could route early and predict the branch there
-        auto* domainMatch = domainRouter.match(domain);
-        if (!domainMatch) {
-            HttpResponseWrapper::sendErrorPage(res, "404");
-            return;
-        }
+                std::string_view cl = req->getHeader("content-length");
+                reqObject->Set(context, keys.contentLength.Get(isolate),
+                            oneByte(isolate, cl))
+                    .Check();
+            }
 
-        // www redirect fast-path
-        if (domain.size() >= 4 && domain.starts_with("www.")) {
-            res->writeStatus("301 Moved Permanently");
+            // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
+            // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
+            Local<Value> argv[] = {reqObject, resObject};
+            CallJS(isolate, cb.Get(isolate), 2, argv);
 
-            std::string location;
-            location.reserve(8 + domain.size() + url.size());
-            constexpr bool SSL = std::is_same<APP, uWS::SSLApp>::value;
-            location += SSL ? "https://" : "http://";
-            location.append(domain.data() + 4, domain.size() - 4);
-            location += url;
+            // Invalidate request
+            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+        });
+    // } else if (args[1]->IsObject()) { // TODO: Support this
+    //     handler = DomainHandler::fromJsObject(isolate, Local<Object>::Cast(args[1]));
+    } else {
+        // Unsupported handler type
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
 
-            res->writeHeader("Location", location);
-            res->end();
-            return;
-        }
-
-        const DomainHandler *resolved = resolveDomainHandler(domainMatch, url);
-        if (!resolved) {
-            HttpResponseWrapper::sendErrorPage(res, "404");
-            return;
-        }
-
-        if (resolved->kind == DomainHandler::Kind::StaticBuffer && resolved->staticBuffer) {
-            res->end(std::string_view(resolved->staticBuffer->data(), resolved->staticBuffer->size()));
-            return;
-        }
-
-        if (resolved->kind == DomainHandler::Kind::CppFunction && resolved->cppFunction) {
-            (*resolved->cppFunction)(res, req);
-            return;
-        }
-
-        // At this point, we are handing to JS:
-        Isolate *isolate = perContextData->isolate;
-        HandleScope hs(isolate);
-
-        Local<Value> domainArg = Undefined(isolate);
-        bool hasDomainArg = false;
-        Local<Function> domainFunction;
-        bool callDomainFunction = false;
-
-        if (resolved->kind == DomainHandler::Kind::JsObject && resolved->jsObject) {
-            domainArg = Local<Object>::New(isolate, *resolved->jsObject);
-            hasDomainArg = true;
-        } else if (resolved->kind == DomainHandler::Kind::Custom && resolved->customData) {
-            domainArg = External::New(isolate, resolved->customData.get());
-            hasDomainArg = true;
-        } else if (resolved->kind == DomainHandler::Kind::JsFunction && resolved->jsFunction) {
-            domainFunction = Local<Function>::New(isolate, *resolved->jsFunction);
-            callDomainFunction = true;
-        }
-
-        Local<Object> resObject, reqObject;
-        Local<Context> context = isolate->GetCurrentContext();
-        ReqKeys &keys = getReqKeys(isolate);
-
-        resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
-        resObject->SetAlignedPointerInInternalField(0, res);
-
-        reqObject = perContextData->reqTemplate[std::is_same<APP, uWS::H3App>::value].Get(isolate)->Clone();
-        reqObject->SetAlignedPointerInInternalField(0, req);
-
-        reqObject->Set(context, keys.method.Get(isolate),
-                    oneByte(isolate, method)).Check();
-
-        std::string_view origin = req->getHeader("origin");
-        reqObject->Set(context, keys.origin.Get(isolate),
-                    oneByte(isolate, origin)).Check();
-
-        constexpr bool SSL = std::is_same<APP, uWS::SSLApp>::value;
-        reqObject->Set(context, keys.secure.Get(isolate),
-                    Boolean::New(isolate, SSL)).Check();
-
-        reqObject->Set(context, keys.host.Get(isolate),
-                    oneByte(isolate, host)).Check();
-
-        reqObject->Set(context, keys.domain.Get(isolate),
-                    oneByte(isolate, domain)).Check();
-
-        // Decode only if needed
-        if (url.find('%') != std::string_view::npos) {
-            std::string decoded = decodeURIComponent(url);
-            reqObject->Set(context, keys.path.Get(isolate),
-                        oneByte(isolate, decoded))
-                .Check();
-        } else {
-            reqObject->Set(context, keys.path.Get(isolate),
-                        oneByte(isolate, url))
-                .Check();
-        }
-
-        // Methods that are likely to have a body
-        // MAYBE TODO: We could use an ENUM for methods instead, and expose something like backend.METHOD_GET in JS
-        if (method == "POST" ||
-            method == "PUT" ||
-            method == "PATCH" ||
-            method == "DELETE") {
-            std::string_view ct = req->getHeader("content-type");
-            reqObject->Set(context, keys.contentType.Get(isolate),
-                        oneByte(isolate, ct))
-                .Check();
-
-            std::string_view cl = req->getHeader("content-length");
-            reqObject->Set(context, keys.contentLength.Get(isolate),
-                        oneByte(isolate, cl))
-                .Check();
-        }
-
-        // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
-        // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
-        Local<Value> argv[] = {reqObject, resObject, domainArg};
-        if (callDomainFunction) {
-            CallJS(isolate, domainFunction, 2, argv);
-        } else {
-            CallJS(isolate, cb.Get(isolate), hasDomainArg ? 3 : 2, argv);
-        }
-
-        /* Properly invalidate req */
-        reqObject->SetAlignedPointerInInternalField(0, nullptr);
-
-        /* µWS itself will terminate if not responded and not attached
-         * onAborted handler, so we can assume it's done */
-    });
-
+    app->route(patternStr, std::move(handler));
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_close(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
-    app->close();
-    args.GetReturnValue().Set(args.This());
-}
-
-template <typename APP>
-void uWS_App_listen_unix(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+/* app.unroute(pattern) — removes a domain route. */
+void uWS_App_unroute(const FunctionCallbackInfo<Value> &args) {
+    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
-    /* Require at least two arguments */
-    if (missingArguments(2, args)) {
-        return;
-    }
-
-    /* integer options is first (not implemented) */
-
-    /* Callback is first */
-    auto cb = [&args, isolate](auto *token) {
-        /* Return a false boolean if listen failed */
-        Local<Value> argv[] = {token ? Local<Value>::Cast(External::New(isolate, token)) : Local<Value>::Cast(Boolean::New(isolate, false))};
-        /* Immediate call cannot be CallJS */
-        Local<Function>::Cast(args[0])->Call(isolate->GetCurrentContext(), isolate->GetCurrentContext()->Global(), 1, argv).IsEmpty();
-    };
-
-    /* Path is last */
-    std::string path;
-    NativeString h(isolate, args[args.Length() - 1]);
-    if (h.isInvalid(args)) {
-        return;
-    }
-    path = h.getString();
-
-    app->listen(std::move(cb), path);
-
-    args.GetReturnValue().Set(args.This());
-}
-
-template <typename APP>
-void uWS_App_listen(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
-    Isolate *isolate = args.GetIsolate();
-
-    /* Require at least two arguments */
-    if (missingArguments(2, args)) {
-        return;
-    }
-
-    /* Callback is last */
-    auto cb = [&args, isolate](auto *token) {
-        /* Return a false boolean if listen failed */
-        Local<Value> argv[] = {token ? Local<Value>::Cast(External::New(isolate, token)) : Local<Value>::Cast(Boolean::New(isolate, false))};
-        /* Immediate call cannot be CallJS */
-        Local<Function>::Cast(args[args.Length() - 1])->Call(isolate->GetCurrentContext(), isolate->GetCurrentContext()->Global(), 1, argv).IsEmpty();
-    };
-
-    /* Host is first, if present */
-    std::string host;
-    if (!args[0]->IsNumber()) {
-        NativeString h(isolate, args[0]);
-        if (h.isInvalid(args)) {
-            return;
-        }
-        host = h.getString();
-    }
-
-    /* Port, options are in the middle, if present */
-    std::vector<int> numbers;
-    for (int i = std::min<int>(1, host.length()); i < args.Length() - 1; i++) {
-        numbers.push_back(args[i]->Uint32Value(args.GetIsolate()->GetCurrentContext()).ToChecked());
-    }
-
-    /* We only use the most complete overload */
-    app->listen(host, numbers.size() ? numbers[0] : 0,
-                numbers.size() > 1 ? numbers[1] : 0, std::move(cb));
-
-    args.GetReturnValue().Set(args.This());
-}
-
-template <typename APP>
-void uWS_App_filter(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
-    /* Handler */
-    Callback checkedCallback(args.GetIsolate(), args[0]);
-    if (checkedCallback.isInvalid(args)) {
-        return;
-    }
-    UniquePersistent<Function> cb = checkedCallback.getFunction();
-
-    /* This function requires perContextData */
-    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-
-    app->filter([cb = std::move(cb), perContextData](auto *res, int count) {
-        Isolate *isolate = perContextData->isolate;
-        HandleScope hs(isolate);
-
-        Local<Object> resObject = perContextData->resTemplate[getAppTypeIndex<APP>()].Get(isolate)->Clone();
-        resObject->SetAlignedPointerInInternalField(0, res);
-
-        Local<Value> argv[] = {resObject, Local<Value>::Cast(Integer::New(isolate, count))};
-        CallJS(isolate, cb.Get(isolate), 2, argv);
-    });
-
-    args.GetReturnValue().Set(args.This());
-}
-
-template <typename APP>
-void uWS_App_domain(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
-    Isolate *isolate = args.GetIsolate();
-
-    /* serverName */
     if (missingArguments(1, args)) {
         return;
     }
 
-    NativeString serverName(isolate, args[0]);
-    if (serverName.isInvalid(args)) {
+    NativeString pattern(isolate, args[0]);
+    if (pattern.isInvalid(args)) {
         return;
     }
 
-    app->domain(std::string(serverName.getString()));
+    app->unroute(std::string(pattern.getString()));
 
     args.GetReturnValue().Set(args.This());
 }
 
-
-template <typename APP>
+/* app.publish(topic, message, isBinary, compress) */
 void uWS_App_publish(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -949,9 +270,9 @@ void uWS_App_publish(const FunctionCallbackInfo<Value> &args) {
     args.GetReturnValue().Set(Boolean::New(isolate, ok));
 }
 
-template <typename APP>
+/* app.numSubscribers(topic) */
 void uWS_App_numSubscribers(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -968,10 +289,43 @@ void uWS_App_numSubscribers(const FunctionCallbackInfo<Value> &args) {
     args.GetReturnValue().Set(Integer::New(isolate, app->numSubscribers(topic.getString())));
 }
 
-/* This one modified per-thread static strings temporarily */
+/* uWS.App() constructor */
+void uWS_App_constructor(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    Local<FunctionTemplate> appTemplate = FunctionTemplate::New(isolate);
+    appTemplate->SetClassName(String::NewFromUtf8(isolate, "uWS.App", NewStringType::kNormal).ToLocalChecked());
+
+    /* 1 internal field: App* */
+    appTemplate->InstanceTemplate()->SetInternalFieldCount(1);
+
+    /* App methods — protocol agnostic */
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "route", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_route, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "unroute", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_unroute, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "publish", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_publish, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "numSubscribers", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_numSubscribers, args.Data()));
+
+    Local<Object> localApp = appTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
+
+    /* Create the App */
+    uWS::App *app = new uWS::App();
+
+    /* Set domain router on app from the global domainRouter */
+    extern Akeno::DomainRouter<DomainHandler> domainRouter;
+    app->setDomainRouter(&domainRouter);
+
+    localApp->SetAlignedPointerInInternalField(0, app);
+
+    /* Store for cleanup */
+    perContextData->apps.emplace_back(app);
+
+    args.GetReturnValue().Set(localApp);
+}
+
 std::pair<uWS::SocketContextOptions, bool> readOptionsObject(const FunctionCallbackInfo<Value> &args, int index) {
     Isolate *isolate = args.GetIsolate();
-    /* Read the options object if any */
+
     uWS::SocketContextOptions options = {};
     thread_local std::string keyFileName, certFileName, passphrase, dhParamsFileName, caFileName, sslCiphers;
     if (args.Length() > index) {
@@ -1045,88 +399,477 @@ std::pair<uWS::SocketContextOptions, bool> readOptionsObject(const FunctionCallb
     return {options, true};
 }
 
-template <typename APP>
-void uWS_App_adoptSocket(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+/* protocol.ws('/pattern', behavior) */
+template <typename PROTO>
+void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 
+    /* pattern, behavior */
+    if (missingArguments(2, args)) {
+        return;
+    }
+
+    Isolate *isolate = args.GetIsolate();
+
+    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    /* This one is default constructed with defaults */
+    typename PROTO::template WebSocketBehavior<PerSocketData> behavior = {};
+
+    NativeString pattern(args.GetIsolate(), args[0]);
+    if (pattern.isInvalid(args)) {
+        return;
+    }
+
+    Global<Function> upgradePf;
+    Global<Function> openPf;
+    Global<Function> messagePf;
+    Global<Function> drainPf;
+    Global<Function> closePf;
+    Global<Function> droppedPf;
+    Global<Function> pingPf;
+    Global<Function> pongPf;
+    Global<Function> subscriptionPf;
+
+    /* Get the behavior object */
+    if (args.Length() == 2) {
+        Local<Object> behaviorObject = Local<Object>::Cast(args[1]);
+
+        /* maxPayloadLength or default */
+        MaybeLocal<Value> maybeMaxPayloadLength = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxPayloadLength", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeMaxPayloadLength.IsEmpty() && !maybeMaxPayloadLength.ToLocalChecked()->IsUndefined()) {
+            behavior.maxPayloadLength = maybeMaxPayloadLength.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* idleTimeout or default */
+        MaybeLocal<Value> maybeIdleTimeout = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "idleTimeout", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeIdleTimeout.IsEmpty() && !maybeIdleTimeout.ToLocalChecked()->IsUndefined()) {
+            behavior.idleTimeout = maybeIdleTimeout.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* maxLifetime or default */
+        MaybeLocal<Value> maybeMaxLifetime = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxLifetime", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeMaxLifetime.IsEmpty() && !maybeMaxLifetime.ToLocalChecked()->IsUndefined()) {
+            behavior.maxLifetime = maybeMaxLifetime.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* closeOnBackpressureLimit or default */
+        MaybeLocal<Value> maybeCloseOnBackpressureLimit = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "closeOnBackpressureLimit", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeCloseOnBackpressureLimit.IsEmpty() && !maybeCloseOnBackpressureLimit.ToLocalChecked()->IsUndefined()) {
+            behavior.closeOnBackpressureLimit = maybeCloseOnBackpressureLimit.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* sendPingsAutomatically or default */
+        MaybeLocal<Value> maybeSendPingsAutomatically = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "sendPingsAutomatically", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeSendPingsAutomatically.IsEmpty() && !maybeSendPingsAutomatically.ToLocalChecked()->IsUndefined()) {
+            behavior.sendPingsAutomatically = maybeSendPingsAutomatically.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* Compression or default */
+        MaybeLocal<Value> maybeCompression = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "compression", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeCompression.IsEmpty() && !maybeCompression.ToLocalChecked()->IsUndefined()) {
+            behavior.compression = (uWS::CompressOptions) maybeCompression.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* maxBackpressure or default */
+        MaybeLocal<Value> maybeMaxBackpressure = behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "maxBackpressure", NewStringType::kNormal).ToLocalChecked());
+        if (!maybeMaxBackpressure.IsEmpty() && !maybeMaxBackpressure.ToLocalChecked()->IsUndefined()) {
+            behavior.maxBackpressure = maybeMaxBackpressure.ToLocalChecked()->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
+
+        /* Upgrade */
+        upgradePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "upgrade", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Open */
+        openPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "open", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Message */
+        messagePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "message", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Drain */
+        drainPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "drain", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Close */
+        closePf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "close", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Dropped */
+        droppedPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "dropped", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Ping */
+        pingPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "ping", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+        /* Pong */
+        pongPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "pong", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+    	/* Subscription */
+        subscriptionPf.Reset(args.GetIsolate(), Local<Function>::Cast(behaviorObject->Get(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "subscription", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked()));
+
+    }
+
+    constexpr bool SSL = std::is_same<PROTO, uWS::SSLProtocol>::value;
+
+    /* Upgrade handler is always optional */
+    if (upgradePf != Undefined(isolate)) {
+        behavior.upgrade = [upgradePf = std::move(upgradePf), perContextData](auto *res, auto *req, auto *context) {
+            Isolate *isolate = perContextData->isolate;
+            HandleScope hs(isolate);
+
+            Local<Function> upgradeLf = Local<Function>::New(isolate, upgradePf);
+            Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
+            resObject->SetAlignedPointerInInternalField(0, res);
+
+            Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
+            reqObject->SetAlignedPointerInInternalField(0, req);
+
+            Local<Value> argv[3] = {resObject, reqObject, External::New(isolate, (void *) context)};
+            CallJS(isolate, upgradeLf, 3, argv);
+
+            /* Properly invalidate req */
+            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+        };
+    }
+
+    /* Open handler is NOT optional for the wrapper */
+    behavior.open = [openPf = std::move(openPf), perContextData](auto *ws) {
+        Isolate *isolate = perContextData->isolate;
+        HandleScope hs(isolate);
+
+        constexpr int wsIdx = SSL ? 1 : 0;
+
+        /* Create a new websocket object */
+        Local<Object> wsObject = perContextData->wsTemplate[wsIdx].Get(isolate)->Clone();
+        wsObject->SetAlignedPointerInInternalField(0, ws);
+
+        /* Retrieve temporary userData object */
+        PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+
+        /* Copy entires from userData, only if we have it set (not the case for default constructor) */
+        if (!perSocketData->socketPf.IsEmpty()) {
+            Local<Object> userData = Local<Object>::New(isolate, perSocketData->socketPf);
+
+            /* Merge userData and wsObject */
+            Local<Array> keys;
+            if (userData->GetOwnPropertyNames(isolate->GetCurrentContext()).ToLocal(&keys)) {
+                for (int i = 0; i < (int)keys->Length(); i++) {
+                    wsObject->Set(isolate->GetCurrentContext(),
+                        keys->Get(isolate->GetCurrentContext(), i).ToLocalChecked(),
+                        userData->Get(isolate->GetCurrentContext(), keys->Get(isolate->GetCurrentContext(), i).ToLocalChecked()).ToLocalChecked()
+                        ).ToChecked();
+                }
+            }
+        }
+
+        /* Attach a new V8 object with pointer to us, to it */
+        perSocketData->socketPf.Reset(isolate, wsObject);
+
+        Local<Function> openLf = Local<Function>::New(isolate, openPf);
+        if (!openLf->IsUndefined()) {
+            Local<Value> argv[] = {wsObject};
+            CallJS(isolate, openLf, 1, argv);
+        }
+    };
+
+    /* Message handler is always optional */
+    if (messagePf != Undefined(isolate)) {
+        behavior.message = [messagePf = std::move(messagePf), isolate](auto *ws, std::string_view message, uWS::OpCode opCode) {
+            HandleScope hs(isolate);
+
+            Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[3] = {Local<Object>::New(isolate, perSocketData->socketPf),
+                                    messageArrayBuffer,
+                                    Boolean::New(isolate, opCode == uWS::OpCode::BINARY)};
+
+            CallJS(isolate, Local<Function>::New(isolate, messagePf), 3, argv);
+
+            messageArrayBuffer->Detach();
+        };
+    }
+
+    /* Dropped handler is always optional */
+    if (droppedPf != Undefined(isolate)) {
+        behavior.dropped = [droppedPf = std::move(droppedPf), isolate](auto *ws, std::string_view message, uWS::OpCode opCode) {
+            HandleScope hs(isolate);
+
+            Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[3] = {Local<Object>::New(isolate, perSocketData->socketPf),
+                                    messageArrayBuffer,
+                                    Boolean::New(isolate, opCode == uWS::OpCode::BINARY)};
+
+            CallJS(isolate, Local<Function>::New(isolate, droppedPf), 3, argv);
+
+            messageArrayBuffer->Detach();
+        };
+    }
+
+    /* Drain handler is always optional */
+    if (drainPf != Undefined(isolate)) {
+        behavior.drain = [drainPf = std::move(drainPf), isolate](auto *ws) {
+            HandleScope hs(isolate);
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[1] = {Local<Object>::New(isolate, perSocketData->socketPf)
+                                    };
+            CallJS(isolate, Local<Function>::New(isolate, drainPf), 1, argv);
+        };
+    }
+
+    /* Subscription handler is always optional */
+    if (subscriptionPf != Undefined(isolate)) {
+        behavior.subscription = [subscriptionPf = std::move(subscriptionPf), isolate](auto *ws, std::string_view topic, int newCount, int oldCount) {
+            HandleScope hs(isolate);
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[4] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) topic.data(), topic.length()), Integer::New(isolate, newCount), Integer::New(isolate, oldCount)};
+            CallJS(isolate, Local<Function>::New(isolate, subscriptionPf), 4, argv);
+        };
+    }
+
+    /* Ping handler is always optional */
+    if (pingPf != Undefined(isolate)) {
+        behavior.ping = [pingPf = std::move(pingPf), isolate](auto *ws, std::string_view message) {
+            HandleScope hs(isolate);
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[2] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) message.data(), message.length())};
+            CallJS(isolate, Local<Function>::New(isolate, pingPf), 2, argv);
+        };
+    }
+
+    /* Pong handler is always optional */
+    if (pongPf != Undefined(isolate)) {
+        behavior.pong = [pongPf = std::move(pongPf), isolate](auto *ws, std::string_view message) {
+            HandleScope hs(isolate);
+
+            PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+            Local<Value> argv[2] = {Local<Object>::New(isolate, perSocketData->socketPf), ArrayBuffer_New(isolate, (void *) message.data(), message.length())};
+            CallJS(isolate, Local<Function>::New(isolate, pongPf), 2, argv);
+        };
+    }
+
+    /* Close handler is NOT optional for the wrapper */
+    behavior.close = [closePf = std::move(closePf), isolate](auto *ws, int code, std::string_view message) {
+        HandleScope hs(isolate);
+
+        Local<ArrayBuffer> messageArrayBuffer = ArrayBuffer_New(isolate, (void *) message.data(), message.length());
+        PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
+        Local<Object> wsObject = Local<Object>::New(isolate, perSocketData->socketPf);
+
+        /* Invalidate this wsObject */
+        wsObject->SetAlignedPointerInInternalField(0, nullptr);
+
+        /* Only call close handler if we have one set */
+        Local<Function> closeLf = Local<Function>::New(isolate, closePf);
+        if (!closeLf->IsUndefined()) {
+            Local<Value> argv[3] = {wsObject, Integer::New(isolate, code), messageArrayBuffer};
+            CallJS(isolate, closeLf, 3, argv);
+        }
+
+        perSocketData->socketPf.Reset();
+
+        messageArrayBuffer->Detach();
+    };
+
+    proto->template ws<PerSocketData>(std::string(pattern.getString()), std::move(behavior));
+
+    /* Return this */
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.close() */
+template <typename PROTO>
+void uWS_Proto_close(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    proto->close();
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.listen(cb, path) — Unix domain socket */
+template <typename PROTO>
+void uWS_Proto_listen_unix(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(2, args)) {
+        return;
+    }
+
+    auto cb = [&args, isolate](auto *token) {
+        Local<Value> argv[] = {token ? Local<Value>::Cast(External::New(isolate, token)) : Local<Value>::Cast(Boolean::New(isolate, false))};
+        Local<Function>::Cast(args[0])->Call(isolate->GetCurrentContext(), isolate->GetCurrentContext()->Global(), 1, argv).IsEmpty();
+    };
+
+    std::string path;
+    NativeString h(isolate, args[args.Length() - 1]);
+    if (h.isInvalid(args)) {
+        return;
+    }
+    path = h.getString();
+
+    proto->listen(std::move(cb), path);
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.listen([host], port, [options], callback) */
+template <typename PROTO>
+void uWS_Proto_listen(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(2, args)) {
+        return;
+    }
+
+    /* Callback is last */
+    auto cb = [&args, isolate](auto *token) {
+        Local<Value> argv[] = {token ? Local<Value>::Cast(External::New(isolate, token)) : Local<Value>::Cast(Boolean::New(isolate, false))};
+        Local<Function>::Cast(args[args.Length() - 1])->Call(isolate->GetCurrentContext(), isolate->GetCurrentContext()->Global(), 1, argv).IsEmpty();
+    };
+
+    /* Host is first, if present */
+    std::string host;
+    if (!args[0]->IsNumber()) {
+        NativeString h(isolate, args[0]);
+        if (h.isInvalid(args)) {
+            return;
+        }
+        host = h.getString();
+    }
+
+    /* Port, options are in the middle, if present */
+    std::vector<int> numbers;
+    for (int i = std::min<int>(1, host.length()); i < args.Length() - 1; i++) {
+        numbers.push_back(args[i]->Uint32Value(args.GetIsolate()->GetCurrentContext()).ToChecked());
+    }
+
+    proto->listen(host, numbers.size() ? numbers[0] : 0,
+                numbers.size() > 1 ? numbers[1] : 0, std::move(cb));
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.filter(handler) */
+template <typename PROTO>
+void uWS_Proto_filter(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+
+    Callback checkedCallback(args.GetIsolate(), args[0]);
+    if (checkedCallback.isInvalid(args)) {
+        return;
+    }
+    UniquePersistent<Function> cb = checkedCallback.getFunction();
+
+    PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    proto->filter([cb = std::move(cb), perContextData](auto *res, int count) {
+        Isolate *isolate = perContextData->isolate;
+        HandleScope hs(isolate);
+
+        constexpr int idx = getProtoTypeIndex<PROTO>();
+        Local<Object> resObject = perContextData->resTemplate[idx].Get(isolate)->Clone();
+        resObject->SetAlignedPointerInInternalField(0, res);
+
+        Local<Value> argv[] = {resObject, Local<Value>::Cast(Integer::New(isolate, count))};
+        CallJS(isolate, cb.Get(isolate), 2, argv);
+    });
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.bind(appObject) — bind this protocol to an App */
+template <typename PROTO>
+void uWS_Proto_bind(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+
+    if (missingArguments(1, args)) {
+        return;
+    }
+
+    /* The first argument should be an App JS object with an App* at internal field 0 */
+    if (!args[0]->IsObject()) {
+        args.GetReturnValue().Set(args.GetIsolate()->ThrowException(v8::Exception::Error(String::NewFromUtf8(args.GetIsolate(), "bind() requires an App object", NewStringType::kNormal).ToLocalChecked())));
+        return;
+    }
+
+    Local<Object> appObject = Local<Object>::Cast(args[0]);
+    uWS::App *app = (uWS::App *) appObject->GetAlignedPointerFromInternalField(0);
+
+    proto->bind(app);
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.unbind() — unbind this protocol from its current App */
+template <typename PROTO>
+void uWS_Proto_unbind(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    proto->unbind();
+    args.GetReturnValue().Set(args.This());
+}
+
+/* protocol.adoptSocket(fd) */
+template <typename PROTO>
+void uWS_Proto_adoptSocket(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     int32_t fd = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-
-    app->adoptSocket(fd);
+    proto->adoptSocket(fd);
 
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_removeChildApp(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
+/* protocol.removeChildAppDescriptor(descriptor) */
+template <typename PROTO>
+void uWS_Proto_removeChildApp(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     double descriptor = args[0]->NumberValue(isolate->GetCurrentContext()).ToChecked();
 
-    APP *receivingApp;
-    memcpy(&receivingApp, &descriptor, sizeof(receivingApp));
+    PROTO *receivingProto;
+    memcpy(&receivingProto, &descriptor, sizeof(receivingProto));
 
-    app->removeChildApp(receivingApp);
+    proto->removeChildProtocol(receivingProto);
 
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_addChildApp(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
+/* protocol.addChildAppDescriptor(descriptor) */
+template <typename PROTO>
+void uWS_Proto_addChildApp(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     double descriptor = args[0]->NumberValue(isolate->GetCurrentContext()).ToChecked();
 
+    PROTO *receivingProto;
+    memcpy(&receivingProto, &descriptor, sizeof(receivingProto));
 
-    APP *receivingApp;// = (APP *) args[0]->ToObject(isolate->GetCurrentContext()).ToLocalChecked()->GetAlignedPointerFromInternalField(0);
-
-    memcpy(&receivingApp, &descriptor, sizeof(receivingApp));
-
-    /* Todo: check the class type of args[0] must match class type of args.This() */
-    //if (args[0])
-
-    //std::cout << "addChildApp: " << receivingApp << std::endl;
-
-    app->addChildApp(receivingApp);
+    proto->addChildProtocol(receivingProto);
 
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_getDescriptor(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
+/* protocol.getDescriptor() */
+template <typename PROTO>
+void uWS_Proto_getDescriptor(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
-    static_assert(sizeof(double) >= sizeof(app));
+    static_assert(sizeof(double) >= sizeof(proto));
 
-    //static thread_local std::unordered_set<UniquePersistent<Object>> persistentApps;
-
-    UniquePersistent<Object> *persistentApp = new UniquePersistent<Object>;
-    persistentApp->Reset(args.GetIsolate(), args.This());
-
-    //persistentApps.emplace(persistentApp);
+    UniquePersistent<Object> *persistentProto = new UniquePersistent<Object>;
+    persistentProto->Reset(args.GetIsolate(), args.This());
 
     double descriptor = 0;
-    memcpy(&descriptor, &app, sizeof(app));
-
-    //std::cout << "getDescriptor: " << app << std::endl;
-
-    //std::cout << "Loop: " << app->getLoop() << std::endl;
+    memcpy(&descriptor, &proto, sizeof(proto));
 
     args.GetReturnValue().Set(Number::New(isolate, descriptor));
 }
 
-template <typename APP>
-void uWS_App_addServerName(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
+/* protocol.addServerName(hostname, options) */
+template <typename PROTO>
+void uWS_Proto_addServerName(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
+
     NativeString hostnamePatternValue(isolate, args[0]);
     if (hostnamePatternValue.isInvalid(args)) {
         return;
@@ -1141,16 +884,17 @@ void uWS_App_addServerName(const FunctionCallbackInfo<Value> &args) {
         return;
     }
 
-    app->addServerName(hostnamePattern.c_str(), options);
+    proto->addServerName(hostnamePattern.c_str(), options);
 
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_removeServerName(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
-
+/* protocol.removeServerName(hostname) */
+template <typename PROTO>
+void uWS_Proto_removeServerName(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
+
     NativeString hostnamePatternValue(isolate, args[0]);
     if (hostnamePatternValue.isInvalid(args)) {
         return;
@@ -1160,21 +904,21 @@ void uWS_App_removeServerName(const FunctionCallbackInfo<Value> &args) {
         hostnamePattern = hostnamePatternValue.getString();
     }
 
-    app->removeServerName(hostnamePattern.c_str());
+    proto->removeServerName(hostnamePattern.c_str());
 
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App_missingServerName(const FunctionCallbackInfo<Value> &args) {
-    APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+/* protocol.missingServerName(handler) */
+template <typename PROTO>
+void uWS_Proto_missingServerName(const FunctionCallbackInfo<Value> &args) {
+    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     UniquePersistent<Function> missingPf;
     missingPf.Reset(args.GetIsolate(), Local<Function>::Cast(args[0]));
 
-    app->missingServerName([missingPf = std::move(missingPf), isolate](const char *hostname) {
-        /* We hand a JavaScript string here */
+    proto->missingServerName([missingPf = std::move(missingPf), isolate](const char *hostname) {
         HandleScope hs(isolate);
         Local<Function> missingLf = Local<Function>::New(isolate, missingPf);
         Local<Value> argv[1] = {String::NewFromUtf8(isolate, hostname, NewStringType::kNormal).ToLocalChecked()};
@@ -1184,188 +928,65 @@ void uWS_App_missingServerName(const FunctionCallbackInfo<Value> &args) {
     args.GetReturnValue().Set(args.This());
 }
 
-template <typename APP>
-void uWS_App(const FunctionCallbackInfo<Value> &args) {
-
+/* uWS.HTTPProtocol() or uWS.SSLProtocol() constructor */
+template <typename PROTO>
+void uWS_Proto_constructor(const FunctionCallbackInfo<Value> &args) {
     Isolate *isolate = args.GetIsolate();
-    Local<FunctionTemplate> appTemplate = FunctionTemplate::New(isolate);
-    appTemplate->SetClassName(String::NewFromUtf8(isolate, std::is_same<APP, uWS::SSLApp>::value ? "uWS.SSLApp" : "uWS.App", NewStringType::kNormal).ToLocalChecked());
 
     auto [options, valid] = readOptionsObject(args, 0);
     if (!valid) {
         return;
     }
 
-    APP *app;
+    /* Create the Protocol */
+    PROTO *proto = new PROTO(options);
 
-    if constexpr (!std::is_same<APP, uWS::H3App>::value) {
-
-        /* uSockets copies strings here */
-        app = new APP(options);
-
-        /* Throw if we failed to construct the app */
-        if (app->constructorFailed()) {
-            delete app;
-            args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "App construction failed", NewStringType::kNormal).ToLocalChecked())));
-            return;
-        }
-
-    } else {
-
-        appTemplate->SetClassName(String::NewFromUtf8(isolate, "uWS.H3App", NewStringType::kNormal).ToLocalChecked());
-
-        app = new APP(options);
+    if (proto->constructorFailed()) {
+        delete proto;
+        args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "Protocol construction failed", NewStringType::kNormal).ToLocalChecked())));
+        return;
     }
 
-    appTemplate->InstanceTemplate()->SetInternalFieldCount(1);
+    constexpr bool isSSL = std::is_same<PROTO, uWS::SSLProtocol>::value;
 
+    Local<FunctionTemplate> protoTemplate = FunctionTemplate::New(isolate);
+    protoTemplate->SetClassName(String::NewFromUtf8(isolate, isSSL ? "uWS.SSLProtocol" : "uWS.HTTPProtocol", NewStringType::kNormal).ToLocalChecked());
 
-    /* All the http methods */
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "get", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        
-        /* Add non-cached variants */
-        if constexpr (std::is_same<APP, uWS::App>::value) {
+    /* 1 internal field: Protocol* */
+    protoTemplate->InstanceTemplate()->SetInternalFieldCount(1);
 
-            if (args.Length() == 3) {
-                /* Use cached variant */
-                std::cout << "Registering cached get handler" << std::endl;
+    /* Protocol methods */
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "listen", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_listen<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "listen_unix", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_listen_unix<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "close", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_close<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "filter", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_filter<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "ws", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_ws<PROTO>, args.Data()));
 
+    /* App binding */
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "bind", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_bind<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "unbind", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_unbind<PROTO>, args.Data()));
 
-                APP *app = (APP *) args.This()->GetAlignedPointerFromInternalField(0);
+    /* Load balancing */
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "removeChildAppDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_removeChildApp<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "addChildAppDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_addChildApp<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_getDescriptor<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "adoptSocket", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_adoptSocket<PROTO>, args.Data()));
 
-                /* Pattern */
-                NativeString pattern(args.GetIsolate(), args[0]);
-                if (pattern.isInvalid(args)) {
-                    return;
-                }
+    /* SNI */
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "addServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_addServerName<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "removeServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_removeServerName<PROTO>, args.Data()));
+    protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "missingServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_missingServerName<PROTO>, args.Data()));
 
-                /* Handler */
-                Callback checkedCallback(args.GetIsolate(), args[1]);
-                if (checkedCallback.isInvalid(args)) {
-                    return;
-                }
-                UniquePersistent<Function> cb = checkedCallback.getFunction();
+    Local<Object> localProto = protoTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
+    localProto->SetAlignedPointerInInternalField(0, proto);
 
-                /* This function requires perContextData */
-                PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-
-                app->get(std::string(pattern.getString()), [cb = std::move(cb), perContextData](auto *res, auto *req) {
-                    Isolate *isolate = perContextData->isolate;
-                    HandleScope hs(isolate);
-
-
-                    // this needs to be cachedresponse wrapper (for both cached tcp and cached SSL?)
-                    Local<Object> resObject = perContextData->resTemplate[/*getAppTypeIndex<APP>()*/3].Get(isolate)->Clone();
-                    resObject->SetAlignedPointerInInternalField(0, res);
-
-                    Local<Object> reqObject = perContextData->reqTemplate[std::is_same<APP, uWS::H3App>::value].Get(isolate)->Clone();
-                    reqObject->SetAlignedPointerInInternalField(0, req);
-
-                    Local<Value> argv[] = {resObject, reqObject};
-                    CallJS(isolate, cb.Get(isolate), 2, argv);
-
-                    /* Properly invalidate req */
-                    reqObject->SetAlignedPointerInInternalField(0, nullptr);
-
-                    /* µWS itself will terminate if not responded and not attached
-                    * onAborted handler, so we can assume it's done */
-                }/*, 13*/);
-
-                args.GetReturnValue().Set(args.This());
-
-
-            } else {
-                uWS_App_get<APP>(&uWS::TemplatedApp<false>::get, args);
-            }
-
-        } else if constexpr (std::is_same<APP, uWS::SSLApp>::value) {
-            uWS_App_get<APP>(&uWS::TemplatedApp<true>::get, args);
-        }
-       
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "post", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::post, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "options", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::options, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "del", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::del, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "patch", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::patch, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "put", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::put, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "head", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::head, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "connect", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::connect, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "trace", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::trace, args);
-    }, args.Data()));
-
-    /* Any http method */
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "any", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, [](auto &args) {
-        uWS_App_get<APP>(&APP::any, args);
-    }, args.Data()));
-
-    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "listen", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_listen<APP>, args.Data()));
-    
-    if constexpr (!std::is_same<APP, uWS::H3App>::value) {
-
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "close", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_close<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "listen_unix", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_listen_unix<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "filter", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_filter<APP>, args.Data()));
-
-        /* load balancing */
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "removeChildAppDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_removeChildApp<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "addChildAppDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_addChildApp<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getDescriptor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_getDescriptor<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "adoptSocket", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_adoptSocket<APP>, args.Data()));
-
-        /* ws, listen */
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "ws", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_ws<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "publish", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_publish<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "numSubscribers", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_numSubscribers<APP>, args.Data()));
-
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "domain", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_domain<APP>, args.Data()));
-
-        /* SNI */
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "addServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_addServerName<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "removeServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_removeServerName<APP>, args.Data()));
-        appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "missingServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_missingServerName<APP>, args.Data()));
-
-    }
-
-    Local<Object> localApp = appTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
-    localApp->SetAlignedPointerInInternalField(0, app);
-
+    /* Store for cleanup */
     PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-
-
-    if constexpr (!std::is_same<APP, uWS::H3App>::value) {
-
-        /* Add this to our delete list */
-        if constexpr (std::is_same<APP, uWS::SSLApp>::value) {
-            perContextData->sslApps.emplace_back(app);
-        } else {
-            perContextData->apps.emplace_back(app);
-        }
-
+    if constexpr (isSSL) {
+        perContextData->sslProtocols.emplace_back(proto);
+    } else {
+        perContextData->protocols.emplace_back(proto);
     }
 
-    args.GetReturnValue().Set(localApp);
-
+    args.GetReturnValue().Set(localProto);
 }

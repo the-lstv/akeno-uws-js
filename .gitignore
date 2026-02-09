@@ -22,3 +22,5 @@ build.w.c
 *.exe
 *.obj
 zlib*
+
+.vscode

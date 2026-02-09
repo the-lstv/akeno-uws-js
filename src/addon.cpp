@@ -16,11 +16,9 @@
  */
 
 /* We are only allowed to depend on µWS and V8 in this layer. */
-#include "App.h"
+#include "akeno/DomainHandler.h"
+#include "akeno/App.h"
 #include "Http3App.h"
-
-// Important TODO: keep version in sync with package.json
-#define AKENO_VERSION "1.6.8-beta"
 
 #include <iostream>
 #include <vector>
@@ -34,12 +32,13 @@ using namespace v8;
 #include "HttpResponseWrapper.h"
 #include "HttpRequestWrapper.h"
 #include "AppWrapper.h"
-#include "Router.h"
-
-Akeno::DomainRouter<DomainHandler> domainRouter;
+#include "HTMLParserWrapper.h"
+#include "akeno/Router.h"
 
 #include <numeric>
 #include <functional>
+
+Akeno::DomainRouter<DomainHandler> domainRouter;
 
 /* Todo: Apps should be freed once the GC says so BUT ALWAYS before freeing the loop */
 
@@ -178,43 +177,6 @@ void uWS_clearTimeout(const FunctionCallbackInfo<Value> &args) {
     //clearTimeout_(timer);
 
     //timerCallbacksJS[timer].Reset();
-}
-
-void uWS_routeDomain(const FunctionCallbackInfo<Value> &args) {
-    Isolate *isolate = args.GetIsolate();
-
-    if (missingArguments(2, args)) {
-        return;
-    }
-
-    NativeString pattern(isolate, args[0]);
-    if (pattern.isInvalid(args)) {
-        return;
-    }
-
-    Local<Value> handlerValue = args[1];
-    DomainHandler handler;
-
-    if (handlerValue->IsFunction()) {
-        handler = DomainHandler::fromJsFunction(isolate, Local<Function>::Cast(handlerValue));
-    } else if (handlerValue->IsArrayBuffer() || handlerValue->IsTypedArray() || handlerValue->IsSharedArrayBuffer() || handlerValue->IsString()) {
-        NativeString bufferValue(isolate, handlerValue);
-        if (bufferValue.isInvalid(args)) {
-            return;
-        }
-        std::string buffer(bufferValue.getString().data(), bufferValue.getString().length());
-        handler = DomainHandler::fromStaticBuffer(std::move(buffer));
-    } else if (handlerValue->IsExternal()) {
-        auto *matcher = static_cast<Akeno::PathMatcher<DomainHandler> *>(Local<External>::Cast(handlerValue)->Value());
-        handler = DomainHandler::fromPathMatcher(matcher);
-    } else if (handlerValue->IsObject()) {
-        handler = DomainHandler::fromJsObject(isolate, Local<Object>::Cast(handlerValue));
-    } else {
-        args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "Domain handler must be a function, object, buffer, or external matcher.", NewStringType::kNormal).ToLocalChecked())));
-        return;
-    }
-
-    domainRouter.add(std::string(pattern.getString()), handler);
 }
 
 /* Pass various undocumented configs */
@@ -459,12 +421,19 @@ PerContextData *Main(Local<Object> exports) {
     /* Refer to per context data via External */
     Local<External> externalPerContextData = External::New(isolate, perContextData);
 
-    /* uWS namespace */
-    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App<uWS::App>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
-    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "SSLApp", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App<uWS::SSLApp>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
-
+    /* App - protocol-agnostic routing context */
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    
+    /* Protocol constructors */
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "HTTPProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::HTTPProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "SSLProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::SSLProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    
     /* H3 experimental */
-    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "H3App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App<uWS::H3App>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    /* TODO when H3App is refactored */
+    // exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "H3App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App<uWS::H3App>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+
+    /* HTMLParser - Akeno's HTML and Markdown parser */
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "HTMLParser", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
 
     /* Temporary KV store */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "getString", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_getString)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
@@ -484,7 +453,6 @@ PerContextData *Main(Local<Object> exports) {
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "setTimeout", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_setTimeout)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "clearTimeout", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_clearTimeout)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "arm", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_arm)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
-    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "routeDomain", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_routeDomain)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
 
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "_cfg", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_cfg)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "getParts", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_getParts)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
@@ -537,9 +505,10 @@ NODE_MODULE_INITIALIZER(Local<Object> exports, Local<Value> module, Local<Contex
 
         PerContextData *perContextData = (PerContextData *) arg;
 
-        /* Freeing apps here, it could be done earlier but not sooner */
+        /* Freeing protocols first (they detach from apps), then apps */
+        perContextData->protocols.clear();
+        perContextData->sslProtocols.clear();
         perContextData->apps.clear();
-        perContextData->sslApps.clear();
         /* Freeing the loop here means we give time for our timers to close, etc */
         uWS::Loop::get()->free();
 

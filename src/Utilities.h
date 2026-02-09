@@ -49,36 +49,33 @@ Local<v8::ArrayBuffer> ArrayBuffer_NewCopy(Isolate *isolate, void *data, size_t 
 }
 
 struct PerSocketData {
-    UniquePersistent<Object> socketPf;
+    Global<Object> socketPf;
 };
 
 struct PerContextData {
     Isolate *isolate;
-    UniquePersistent<Object> reqTemplate[2]; // 0 = non-SSL/SSL, 1 = Http3
-    UniquePersistent<Object> resTemplate[4]; // 0 = non-SSL, 1 = SSL, 2 = Http3
-    UniquePersistent<Object> wsTemplate[2];
+    Global<Object> reqTemplate[2]; // 0 = non-SSL/SSL, 1 = Http3
+    Global<Object> resTemplate[4]; // 0 = non-SSL, 1 = SSL, 2 = Http3
+    Global<Object> wsTemplate[2];
 
-    /* We hold all apps until free */
+    /* We hold all apps and protocols until free */
     std::vector<std::unique_ptr<uWS::App>> apps;
-    std::vector<std::unique_ptr<uWS::SSLApp>> sslApps;
+    std::vector<std::unique_ptr<uWS::HTTPProtocol>> protocols;
+    std::vector<std::unique_ptr<uWS::SSLProtocol>> sslProtocols;
 };
 
-template <class APP>
-static constexpr int getAppTypeIndex() {
-    /* Returns 1 for SSLApp and 0 for App */
-    //return std::is_same<APP, uWS::SSLApp>::value;
-
-    /* Returns 2 for H3App */
-
-    if constexpr (std::is_same<APP, uWS::App>::value) {
+/* Returns the resTemplate / wsTemplate index for a protocol type.
+ * 0 = non-SSL, 1 = SSL, 2 = H3 */
+template <class PROTO>
+static constexpr int getProtoTypeIndex() {
+    if constexpr (std::is_same<PROTO, uWS::HTTPProtocol>::value) {
         return 0;
-    } else if constexpr (std::is_same<APP, uWS::SSLApp>::value) {
+    } else if constexpr (std::is_same<PROTO, uWS::SSLProtocol>::value) {
         return 1;
-    } else if constexpr (std::is_same<APP, uWS::H3App>::value) {
+    } else if constexpr (std::is_same<PROTO, uWS::H3App>::value) {
         return 2;
     } else {
-        // why does this fail?
-        //static_assert(false);
+        return 0;
     }
 }
 

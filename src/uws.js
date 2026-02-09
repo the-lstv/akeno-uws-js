@@ -64,4 +64,4 @@ module.exports.DeclarativeResponse = class DeclarativeResponse {
 module.exports.isAkeno = true;
 
 // Which Akeno version we are compatible with, it can be any valid Units.Version comparator (eg. >=1.2.3, etc.)
-module.exports.akenoCompatibility = "1.6.8-beta";
+module.exports.akenoCompatibility = "1.6.9-beta";
