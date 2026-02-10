@@ -23,6 +23,7 @@ const char *X64 = "x64";
 
 int addon_only = 0;
 int latest_only = 0;
+char *selected_version = NULL;
 
 int exists(const char *fname) {
     FILE *file;
@@ -69,6 +70,10 @@ void prepare() {
 
     /* For all versions */
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
+        if (selected_version && strcmp(versions[i].name, selected_version)) {
+            continue;
+        }
+
         char path[256];
         sprintf(path, "node-%s-headers.tar.gz", versions[i].name);
         if (!exists(path)) {
@@ -147,6 +152,10 @@ void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const
     char *cpp_shared = "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/boringssl/include -pthread -DLIBUS_USE_OPENSSL -flto -O3 -c -fPIC -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp";
 
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
+        if (selected_version && strcmp(versions[i].name, selected_version)) {
+            continue;
+        }
+
         if(!addon_only) {
             run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
             run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
@@ -173,6 +182,10 @@ void build_windows(char *compiler, char *cpp_compiler, char *cpp_linker, char *o
     char *cpp_shared = "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/lsquic/wincompat -I uWebSockets/uSockets/boringssl/include -DLIBUS_USE_OPENSSL -O2 -c -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp";
 
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
+        if (selected_version && strcmp(versions[i].name, selected_version)) {
+            continue;
+        }
+
         if(!addon_only) {
             run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
             run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
@@ -197,6 +210,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--latest-only")) {
             latest_only = 1;
             printf("Only building for one Node.js version.\n");
+        }
+        if (strncmp(argv[i], "--version=", 10) == 0) {
+            selected_version = argv[i] + 10;
+        } else if (!strcmp(argv[i], "--version") && i + 1 < argc) {
+            selected_version = argv[++i];
         }
     }
 

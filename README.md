@@ -11,34 +11,45 @@ It moves a bunch of the JavaScript logic to C++ for slightly better performance 
 ## Warning
 The state of this as of now is highly experimental and more of a proof-of-concept.
 
-It is not clean or tested, which is why I recommend using the JavaScript implementations as of now, which are far more stable.
-
 ## Usage
 This is designed to be used by Akeno. If you place them in this structure:
-```
+```sh
 /akeno        # Akeno installation
 /akeno-uws    # This repository
 ```
-Akeno (1.6.8-beta and up) should automatically discover this repository and try to use it's build.
+Akeno (1.6.9-beta and up) should automatically discover this repository and try to use it's build.
 In the future this will be included directly in Akeno, but that is once it is not experimental.
 
 ## Building
-First clone this repository:
-```
+You can build on Linux and Mac OS, maybe on other UNIX-like systems. Windows is not supported, but may work.
+
+First, clone this repository:
+```sh
 git clone --branch master --single-branch --recursive https://github.com/the-lstv/akeno-uws.git
 ```
-To build, simply run:
-```
-make
-```
-On Linux, this should be straightforward. Just to be safe, ensure you have the following packages installed:
-- Fedora (43): `@development-tools cmake git pkgconf-pkg-config libunwind-devel`
+On Linux, this should be straightforward. Just ensure you have the following packages installed:
+- Fedora (43): `@development-tools cmake git pkgconf-pkg-config libunwind-devel clang18 clang18-devel libstdc++-static`
 - Ubuntu/Debian: `build-essential cmake clang-18 zlib1g-dev pkg-config libunwind-dev` (suggested by someone on GitHub)
 
-On Windows you may need to do a bunch of extra steps based on your environment, I don't really know (in my experience, building on Windows was a pain, but I guess it may vary. You will need git, cmake, strawberry perl, likely also whatever $(CC) resolves to, and so on, and these may be more work on Windows). Note that Windows is not officially supported by Akeno so use at your own risk, I give no guarantee it runs well on Windows (just that it probably runs, maybe). I will try to help with issues, but Windows is low priority.
+If `lsquic` fails to compile, try updating it, as the version currently included in uSockets fails on Fedora:
+```sh
+cd uWebSockets/uSockets/lsquic
+git pull origin master
+cd ../../..
+```
+
+To build, simply run:
+```sh
+make
+```
+
+Mac OS may be similar, I haven't tested it. uWebSockets supports it, but I've heard of some issues from time to time, so I can't guarantee it works. It should be relatively similar to Linux, just like any other UNIX-like system.
+
+If you really *must* compile on Windows, you may need to do a bunch of extra steps based on your environment (in my experience, building on Windows is a major pain, but I guess it may vary (I ended up just giving up, as when I finally got it to work, it broke the next day). You will need to manually get the environment (may require you to selectively patch vsdevcmdwhatever and reconstruct your PATH every time because why not), and there are some problems in deciding what compiler format to use, some libraries remap libs for windows support (which usually works, sometimes not, depends on how well the OS slept that day i guess), standard functions give misleading warnings etc.).
+Note that Windows is not officially supported by Akeno, so use at your own risk, I give no guarantee it runs well (if at all) on Windows. I will try to help with issues, but it's the lowest priority.
 
 ## Licence
-Please keep in mind that this repository contains code with different licences:
+This repository contains code with different licences:
 Code from µWebSockets.js is licensed under the Apache License 2.0, and some code originating from Akeno authors is licensed under the GNU General Public License v3.0 (since the Akeno project itself is licensed under GPLv3).
 Thus the resulting binaries are also licensed under GPLv3.
 
