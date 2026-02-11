@@ -61,7 +61,7 @@ struct PerContextData {
     /* We hold all apps and protocols until free */
     std::vector<std::unique_ptr<uWS::App>> apps;
     std::vector<std::unique_ptr<uWS::HTTPProtocol>> protocols;
-    std::vector<std::unique_ptr<uWS::SSLProtocol>> sslProtocols;
+    std::vector<std::unique_ptr<uWS::HTTPSProtocol>> sslProtocols;
 };
 
 /* Returns the resTemplate / wsTemplate index for a protocol type.
@@ -70,7 +70,7 @@ template <class PROTO>
 static constexpr int getProtoTypeIndex() {
     if constexpr (std::is_same<PROTO, uWS::HTTPProtocol>::value) {
         return 0;
-    } else if constexpr (std::is_same<PROTO, uWS::SSLProtocol>::value) {
+    } else if constexpr (std::is_same<PROTO, uWS::HTTPSProtocol>::value) {
         return 1;
     } else if constexpr (std::is_same<PROTO, uWS::H3App>::value) {
         return 2;

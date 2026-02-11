@@ -114,14 +114,16 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
         Callback checkedCallback(args.GetIsolate(), args[1]);
         if (checkedCallback.isInvalid(args)) return;
 
-        Global<Function> cb = checkedCallback.getFunction();
-
         /* This function requires perContextData */
         auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
 
+        // Use shared_ptr to allow both HTTP and HTTPS lambdas to share the Global<Function>
+        auto cbPtr = std::make_shared<Global<Function>>(checkedCallback.getFunction());
+
         // TODO: Optimize calls
 
-        handler = DomainHandler::onRequest([cb = std::move(cb), perContextData](auto *res, auto *req) {
+        // Create a unified template lambda that works with both HTTP and HTTPS (C++20)
+        auto sharedHandler = [cbPtr, perContextData]<bool SSL>(uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req) {
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
             Local<Context> context = isolate->GetCurrentContext();
@@ -129,24 +131,8 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
             reqObject->SetAlignedPointerInInternalField(0, req);
 
-            Local<Object> resObject = perContextData->resTemplate[0].Get(isolate)->Clone();
+            Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
             resObject->SetAlignedPointerInInternalField(0, res);
-
-            Local<Value> domainArg = Undefined(isolate);
-            bool hasDomainArg = false;
-            Local<Function> domainFunction;
-            bool callDomainFunction = false;
-
-            // if (resolved->kind == DomainHandler::Kind::JsObject && resolved->jsObject) {
-            //     domainArg = Local<Object>::New(isolate, *resolved->jsObject);
-            //     hasDomainArg = true;
-            // } else if (resolved->kind == DomainHandler::Kind::Custom && resolved->customData) {
-            //     domainArg = External::New(isolate, resolved->customData.get());
-            //     hasDomainArg = true;
-            // }
-
-            // TODO:FIXME: Stop doing this
-            // Temporary solution until I stabilize things
 
             std::string_view method = req->getMethod();
             std::string_view url = req->getUrl();
@@ -167,7 +153,7 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
                         oneByte(isolate, origin)).Check();
 
             reqObject->Set(context, keys.secure.Get(isolate),
-                        Boolean::New(isolate, 0/*TODO*/)).Check();
+                        Boolean::New(isolate, SSL)).Check();
 
             reqObject->Set(context, keys.host.Get(isolate),
                         oneByte(isolate, host)).Check();
@@ -207,11 +193,21 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
             // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
             Local<Value> argv[] = {reqObject, resObject};
-            CallJS(isolate, cb.Get(isolate), 2, argv);
+            CallJS(isolate, cbPtr->Get(isolate), 2, argv);
 
             // Invalidate request
             reqObject->SetAlignedPointerInInternalField(0, nullptr);
-        });
+        };
+
+        // Instantiate the template lambda for both HTTP and HTTPS
+        handler = DomainHandler::onRequestBoth(
+            [sharedHandler](uWS::HttpResponse<false> *res, uWS::HttpRequest *req) {
+                sharedHandler.template operator()<false>(res, req);
+            },
+            [sharedHandler](uWS::HttpResponse<true> *res, uWS::HttpRequest *req) {
+                sharedHandler.template operator()<true>(res, req);
+            }
+        );
     // } else if (args[1]->IsObject()) { // TODO: Support this
     //     handler = DomainHandler::fromJsObject(isolate, Local<Object>::Cast(args[1]));
     } else {
@@ -498,7 +494,7 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 
     }
 
-    constexpr bool SSL = std::is_same<PROTO, uWS::SSLProtocol>::value;
+    constexpr bool SSL = std::is_same<PROTO, uWS::HTTPSProtocol>::value;
 
     /* Upgrade handler is always optional */
     if (upgradePf != Undefined(isolate)) {
@@ -928,7 +924,7 @@ void uWS_Proto_missingServerName(const FunctionCallbackInfo<Value> &args) {
     args.GetReturnValue().Set(args.This());
 }
 
-/* uWS.HTTPProtocol() or uWS.SSLProtocol() constructor */
+/* uWS.HTTPProtocol() or uWS.HTTPSProtocol() constructor */
 template <typename PROTO>
 void uWS_Proto_constructor(const FunctionCallbackInfo<Value> &args) {
     Isolate *isolate = args.GetIsolate();
@@ -947,10 +943,10 @@ void uWS_Proto_constructor(const FunctionCallbackInfo<Value> &args) {
         return;
     }
 
-    constexpr bool isSSL = std::is_same<PROTO, uWS::SSLProtocol>::value;
+    constexpr bool isSSL = std::is_same<PROTO, uWS::HTTPSProtocol>::value;
 
     Local<FunctionTemplate> protoTemplate = FunctionTemplate::New(isolate);
-    protoTemplate->SetClassName(String::NewFromUtf8(isolate, isSSL ? "uWS.SSLProtocol" : "uWS.HTTPProtocol", NewStringType::kNormal).ToLocalChecked());
+    protoTemplate->SetClassName(String::NewFromUtf8(isolate, isSSL ? "uWS.HTTPSProtocol" : "uWS.HTTPProtocol", NewStringType::kNormal).ToLocalChecked());
 
     /* 1 internal field: Protocol* */
     protoTemplate->InstanceTemplate()->SetInternalFieldCount(1);

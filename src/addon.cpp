@@ -432,7 +432,7 @@ PerContextData *Main(Local<Object> exports) {
     
     /* Protocol constructors */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "HTTPProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::HTTPProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
-    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "SSLProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::SSLProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "HTTPSProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::HTTPSProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     
     /* H3 experimental */
     /* TODO when H3App is refactored */
