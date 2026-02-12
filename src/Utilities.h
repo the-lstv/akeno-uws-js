@@ -21,7 +21,13 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <v8.h>
+#include <memory>
+#include <unordered_map>
 using namespace v8;
+
+namespace uWS {
+    struct App;
+}
 
 /* Unfortunately we _have_ to depend on Node.js crap */
 #include <node.h>
@@ -62,6 +68,8 @@ struct PerContextData {
     std::vector<std::unique_ptr<uWS::App>> apps;
     std::vector<std::unique_ptr<uWS::HTTPProtocol>> protocols;
     std::vector<std::unique_ptr<uWS::HTTPSProtocol>> sslProtocols;
+
+    std::unordered_map<uWS::App *, std::shared_ptr<Global<Function>>> appObjectCallbacks;
 };
 
 /* Returns the resTemplate / wsTemplate index for a protocol type.

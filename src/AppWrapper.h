@@ -67,9 +67,67 @@ struct ReqKeys {
 
 ReqKeys& getReqKeys(v8::Isolate* isolate);
 
+template <bool SSL>
+static inline void initReqResObjects(PerContextData *perContextData, uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req, Local<Object> *reqObjectOut, Local<Object> *resObjectOut) {
+    Isolate *isolate = perContextData->isolate;
+    Local<Context> context = isolate->GetCurrentContext();
+
+    Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
+    reqObject->SetAlignedPointerInInternalField(0, req);
+
+    Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
+    resObject->SetAlignedPointerInInternalField(0, res);
+
+    std::string_view method = req->getCaseSensitiveMethod();
+    std::string_view url = req->getUrl();
+    std::string_view host = req->getHeader("host");
+    std::string_view domain = host;
+    size_t colonPos = host.find(':');
+    if (colonPos != std::string_view::npos) {
+        domain = host.substr(0, colonPos);
+    }
+
+    ReqKeys &keys = getReqKeys(isolate);
+
+    std::string_view origin = req->getHeader("origin");
+    reqObject->Set(context, keys.method.Get(isolate), oneByte(isolate, method)).Check();
+    reqObject->Set(context, keys.origin.Get(isolate), oneByte(isolate, origin)).Check();
+    reqObject->Set(context, keys.secure.Get(isolate), Boolean::New(isolate, SSL)).Check();
+    reqObject->Set(context, keys.host.Get(isolate), oneByte(isolate, host)).Check();
+    reqObject->Set(context, keys.domain.Get(isolate), oneByte(isolate, domain)).Check();
+
+    if (url.find('%') != std::string_view::npos) {
+        std::string decoded = decodeURIComponent(url);
+        reqObject->Set(context, keys.path.Get(isolate),
+                    oneByte(isolate, decoded))
+            .Check();
+    } else {
+        reqObject->Set(context, keys.path.Get(isolate),
+                    oneByte(isolate, url))
+            .Check();
+    }
+
+    if (method == "POST" ||
+        method == "PUT" ||
+        method == "PATCH" ||
+        method == "DELETE") {
+        std::string_view ct = req->getHeader("content-type");
+        reqObject->Set(context, keys.contentType.Get(isolate),
+            oneByte(isolate, ct)).Check();
+
+        std::string_view cl = req->getHeader("content-length");
+        reqObject->Set(context, keys.contentLength.Get(isolate),
+            oneByte(isolate, cl)).Check();
+    }
+
+    *reqObjectOut = reqObject;
+    *resObjectOut = resObject;
+}
+
 /* App wrapper functions — protocol-agnostic */
 
 /* app.route(pattern, handler) — adds a domain route. */
+/* TODO: Cleanup; the current code is mostly a PoC */
 void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
     uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
@@ -126,69 +184,9 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
         auto sharedHandler = [cbPtr, perContextData]<bool SSL>(uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req) {
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
-            Local<Context> context = isolate->GetCurrentContext();
-
-            Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
-            reqObject->SetAlignedPointerInInternalField(0, req);
-
-            Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
-            resObject->SetAlignedPointerInInternalField(0, res);
-
-            std::string_view method = req->getMethod();
-            std::string_view url = req->getUrl();
-            std::string_view host = req->getHeader("host");
-            std::string_view domain = host;
-            size_t colonPos = host.find(':');
-            if (colonPos != std::string_view::npos) {
-                domain = host.substr(0, colonPos);
-            }
-
-            ReqKeys &keys = getReqKeys(isolate);
-
-            reqObject->Set(context, keys.method.Get(isolate),
-                        oneByte(isolate, method)).Check();
-
-            std::string_view origin = req->getHeader("origin");
-            reqObject->Set(context, keys.origin.Get(isolate),
-                        oneByte(isolate, origin)).Check();
-
-            reqObject->Set(context, keys.secure.Get(isolate),
-                        Boolean::New(isolate, SSL)).Check();
-
-            reqObject->Set(context, keys.host.Get(isolate),
-                        oneByte(isolate, host)).Check();
-
-            reqObject->Set(context, keys.domain.Get(isolate),
-                        oneByte(isolate, domain)).Check();
-
-            // Decode only if needed
-            if (url.find('%') != std::string_view::npos) {
-                std::string decoded = decodeURIComponent(url);
-                reqObject->Set(context, keys.path.Get(isolate),
-                            oneByte(isolate, decoded))
-                    .Check();
-            } else {
-                reqObject->Set(context, keys.path.Get(isolate),
-                            oneByte(isolate, url))
-                    .Check();
-            }
-
-            // Methods that are likely to have a body
-            // MAYBE TODO: We could use an ENUM for methods instead, and expose something like backend.METHOD_GET in JS
-            if (method == "POST" ||
-                method == "PUT" ||
-                method == "PATCH" ||
-                method == "DELETE") {
-                std::string_view ct = req->getHeader("content-type");
-                reqObject->Set(context, keys.contentType.Get(isolate),
-                            oneByte(isolate, ct))
-                    .Check();
-
-                std::string_view cl = req->getHeader("content-length");
-                reqObject->Set(context, keys.contentLength.Get(isolate),
-                            oneByte(isolate, cl))
-                    .Check();
-            }
+                Local<Object> reqObject;
+                Local<Object> resObject;
+                initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
 
             // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
             // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
@@ -208,8 +206,42 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
                 sharedHandler.template operator()<true>(res, req);
             }
         );
-    // } else if (args[1]->IsObject()) { // TODO: Support this
-    //     handler = DomainHandler::fromJsObject(isolate, Local<Object>::Cast(args[1]));
+    } else if (args[1]->IsObject()) {
+        /* This function requires perContextData */
+        auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+        auto &callbackPtr = perContextData->appObjectCallbacks[app];
+        if (!callbackPtr) {
+            callbackPtr = std::make_shared<Global<Function>>();
+        }
+
+        auto objectPtr = std::make_shared<Global<Object>>();
+        objectPtr->Reset(isolate, Local<Object>::Cast(args[1]));
+
+        auto sharedHandler = [objectPtr, callbackPtr, perContextData]<bool SSL>(uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req) {
+            Isolate *isolate = perContextData->isolate;
+            HandleScope hs(isolate);
+                Local<Object> reqObject;
+                Local<Object> resObject;
+                initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
+
+            if (callbackPtr && !callbackPtr->IsEmpty()) {
+                Local<Function> onObjectLf = Local<Function>::New(isolate, *callbackPtr);
+                Local<Object> objectValue = Local<Object>::New(isolate, *objectPtr);
+                Local<Value> argv[] = {reqObject, resObject, objectValue};
+                CallJS(isolate, onObjectLf, 3, argv);
+            }
+
+            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+        };
+
+        handler = DomainHandler::onRequestBoth(
+            [sharedHandler](uWS::HttpResponse<false> *res, uWS::HttpRequest *req) {
+                sharedHandler.template operator()<false>(res, req);
+            },
+            [sharedHandler](uWS::HttpResponse<true> *res, uWS::HttpRequest *req) {
+                sharedHandler.template operator()<true>(res, req);
+            }
+        );
     } else {
         // Unsupported handler type
         args.GetReturnValue().Set(args.This());
@@ -236,6 +268,40 @@ void uWS_App_unroute(const FunctionCallbackInfo<Value> &args) {
     }
 
     app->unroute(std::string(pattern.getString()));
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* app.onObject(handler) — handler is called with (req, res, object) */
+void uWS_App_onObject(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(1, args)) {
+        return;
+    }
+
+    auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+
+    auto &callbackPtr = perContextData->appObjectCallbacks[app];
+    if (!callbackPtr) {
+        callbackPtr = std::make_shared<Global<Function>>();
+    }
+
+    if (args[0]->IsNull() || args[0]->IsUndefined()) {
+        callbackPtr->Reset();
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    Callback checkedCallback(isolate, args[0]);
+    if (checkedCallback.isInvalid(args)) {
+        return;
+    }
+
+    UniquePersistent<Function> cb = checkedCallback.getFunction();
+    callbackPtr->Reset();
+    callbackPtr->Reset(isolate, Local<Function>::New(isolate, cb));
 
     args.GetReturnValue().Set(args.This());
 }
@@ -299,6 +365,7 @@ void uWS_App_constructor(const FunctionCallbackInfo<Value> &args) {
     /* App methods — protocol agnostic */
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "route", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_route, args.Data()));
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "unroute", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_unroute, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onObject", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_onObject, args.Data()));
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "publish", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_publish, args.Data()));
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "numSubscribers", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_numSubscribers, args.Data()));
 
@@ -315,6 +382,7 @@ void uWS_App_constructor(const FunctionCallbackInfo<Value> &args) {
 
     /* Store for cleanup */
     perContextData->apps.emplace_back(app);
+    perContextData->appObjectCallbacks.emplace(app, std::make_shared<Global<Function>>());
 
     args.GetReturnValue().Set(localApp);
 }

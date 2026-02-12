@@ -2,7 +2,7 @@
  * This is a testing utility that just does whatever
  */
 
-const uws = require("../../dist/uws");
+const uws = require("../../../dist/uws");
 const http = require("http");
 const https = require("https");
 
@@ -28,10 +28,99 @@ function cleanText(text) {
     return String(text || "").replaceAll("\n", "").replaceAll("\r", "");
 }
 
+function getResponseLength(res) {
+    if (typeof res.text === "string") {
+        return res.text.length;
+    }
+    if (res.buffer) {
+        return res.buffer.length;
+    }
+    return String(res.text || "").length;
+}
+
+function getResponseSnippet(res, maxLength) {
+    if (typeof res.text === "string") {
+        return cleanText(res.text).slice(0, maxLength);
+    }
+    if (res.buffer) {
+        return cleanText(res.buffer.slice(0, maxLength).toString());
+    }
+    return cleanText(String(res.text || "")).slice(0, maxLength);
+}
+
 function summarizeResponse(res) {
-    const text = cleanText(res.text);
-    const snippet = text.slice(0, 100);
-    return `${res.status} ${snippet}${text.length > 100 ? "..." : ""}`;
+    const snippet = getResponseSnippet(res, 100);
+    const length = getResponseLength(res);
+    return `${res.status} ${snippet}${length > 100 ? "..." : ""}`;
+}
+
+function isBinaryLike(value) {
+    return Buffer.isBuffer(value)
+        || value instanceof ArrayBuffer
+        || ArrayBuffer.isView(value);
+}
+
+function toBuffer(value) {
+    if (Buffer.isBuffer(value)) {
+        return value;
+    }
+    if (value instanceof ArrayBuffer) {
+        return Buffer.from(value);
+    }
+    if (ArrayBuffer.isView(value)) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return Buffer.from(String(value || ""));
+}
+
+function getResponseText(res) {
+    if (typeof res.text === "string") {
+        return res.text;
+    }
+    if (res.buffer) {
+        return res.buffer.toString();
+    }
+    return String(res.text || "");
+}
+
+function diffSummary(expectedText, actualText) {
+    const expected = String(expectedText || "");
+    const actual = String(actualText || "");
+    const expectedBuf = Buffer.from(expected);
+    const actualBuf = Buffer.from(actual);
+    const minLen = Math.min(expectedBuf.length, actualBuf.length);
+    let diffBytes = Math.abs(expectedBuf.length - actualBuf.length);
+    let firstDiff = -1;
+
+    for (let i = 0; i < minLen; i++) {
+        if (expectedBuf[i] !== actualBuf[i]) {
+            if (firstDiff === -1) {
+                firstDiff = i;
+            }
+            diffBytes++;
+        }
+    }
+
+    if (firstDiff === -1 && expectedBuf.length === actualBuf.length) {
+        return {
+            diffBytes: 0,
+            firstDiff: -1,
+            expectedSnippet: "",
+            actualSnippet: ""
+        };
+    }
+
+    const start = Math.max(0, (firstDiff === -1 ? 0 : firstDiff) - 40);
+    const end = Math.max(start + 80, start + 1);
+    const expectedSnippet = expected.slice(start, end);
+    const actualSnippet = actual.slice(start, end);
+
+    return {
+        diffBytes,
+        firstDiff,
+        expectedSnippet,
+        actualSnippet
+    };
 }
 
 function logPass(info) {
@@ -103,9 +192,12 @@ function makeRequest(protocol, port, host) {
         };
 
         const req = client.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => resolve({ status: res.statusCode, text: data }));
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const buffer = Buffer.concat(chunks);
+                resolve({ status: res.statusCode, buffer });
+            });
         });
 
         req.on('error', reject);
@@ -171,24 +263,49 @@ function http_test(testString, handler, expected) {
                         host: realHost,
                         expectedDesc: typeof expectedValue === "function"
                             ? "custom assertion"
-                            : `body == "${expectedValue}"${expected === EXPECT_MATCH ? " (EXPECT_MATCH)" : ""}`
+                            : (isBinaryLike(expectedValue)
+                                ? `body (buffer) == ${toBuffer(expectedValue).length} bytes${expected === EXPECT_MATCH ? " (EXPECT_MATCH)" : ""}`
+                                : `body == "${expectedValue}"${expected === EXPECT_MATCH ? " (EXPECT_MATCH)" : ""}`)
                     };
 
                     if (typeof expectedValue === "function") {
                         try {
-                            expectedValue(res, res.text, realHost, hostPattern);
+                            if(!expectedValue(res, res.text, realHost, hostPattern)) {
+                                const err = new Error("Custom assertion failed");
+                                err.context = context;
+                                throw err;
+                            }
                         } catch (err) {
                             err.context = Object.assign({}, context, {
                                 actualDesc: summarizeResponse(res)
                             });
                             throw err;
                         }
-                    } else if (res.text !== expectedValue) {
-                        const err = new Error("Response body mismatch");
-                        err.context = Object.assign({}, context, {
-                            actualDesc: `body == "${cleanText(res.text)}"`
-                        });
-                        throw err;
+                    } else {
+                        const expectedIsBinary = isBinaryLike(expectedValue);
+                        const expectedText = expectedIsBinary ? toBuffer(expectedValue).toString() : String(expectedValue || "");
+                        const actualText = getResponseText(res);
+                        if (expectedIsBinary) {
+                            const expectedBuf = toBuffer(expectedValue);
+                            const actualBuf = res.buffer ? res.buffer : toBuffer(actualText);
+                            if (!expectedBuf.equals(actualBuf)) {
+                                const diff = diffSummary(expectedText, actualText);
+                                const err = new Error("Response body mismatch");
+                                err.context = Object.assign({}, context, {
+                                    expectedDesc: `body (buffer) == ${expectedBuf.length} bytes (diffBytes: ${diff.diffBytes}, firstDiff: ${diff.firstDiff})`,
+                                    actualDesc: `body (buffer) == ${actualBuf.length} bytes\n  expected@${diff.firstDiff}: "${cleanText(diff.expectedSnippet)}"\n  actual@${diff.firstDiff}:   "${cleanText(diff.actualSnippet)}"`
+                                });
+                                throw err;
+                            }
+                        } else if (actualText !== expectedText) {
+                            const diff = diffSummary(expectedText, actualText);
+                            const err = new Error("Response body mismatch");
+                            err.context = Object.assign({}, context, {
+                                expectedDesc: `body == "${expectedText}" (diffBytes: ${diff.diffBytes}, firstDiff: ${diff.firstDiff})`,
+                                actualDesc: `body == "${cleanText(actualText)}"\n  expected@${diff.firstDiff}: "${cleanText(diff.expectedSnippet)}"\n  actual@${diff.firstDiff}:   "${cleanText(diff.actualSnippet)}"`
+                            });
+                            throw err;
+                        }
                     }
 
                     logPass({
@@ -283,5 +400,6 @@ module.exports = {
     runTestsInOrder,
     paint,
     EXPECT_MATCH,
-    uws
+    uws,
+    WRITE_VALUE: (v) => (r, q) => { q.end(v); }
 };

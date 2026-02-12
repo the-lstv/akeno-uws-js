@@ -20,6 +20,9 @@
 #include "Utilities.h"
 #include "akeno/Router.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <v8.h>
 #include <node_buffer.h>
 #include <type_traits>
@@ -433,6 +436,41 @@ struct HttpResponseWrapper {
         }
     }
 
+    template <int PROTOCOL>
+    static void res_streamFile(const FunctionCallbackInfo<Value> &args) {
+        Isolate *isolate = args.GetIsolate();
+        auto *res = getHttpResponse<PROTOCOL>(args);
+        if (res) {
+            if (missingArguments(1, args)) {
+                return;
+            }
+
+            int fd = -1;
+
+            if (args[0]->IsString()) {
+                NativeString path(isolate, args[0]);
+                if (path.isInvalid(args)) {
+                    return;
+                }
+                fd = open(path.getString().data(), O_RDONLY);
+                if (fd < 0) {
+                    isolate->ThrowException(v8::Exception::Error(
+                        String::NewFromUtf8(isolate, "Failed to open file", NewStringType::kNormal).ToLocalChecked()
+                    ));
+                    return;
+                }
+            } else {
+                fd = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+            }
+
+            // streamFile ends the response
+            invalidateResObject(args);
+
+            assumeCorked();
+            res->streamFile(fd); // closes by default
+        }
+    }
+
     /* Takes key, value. Returns this */
     template <int PROTOCOL>
     static void res_writeHeader(const FunctionCallbackInfo<Value> &args) {
@@ -548,7 +586,7 @@ struct HttpResponseWrapper {
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onWritable", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_onWritable<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onAborted", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_onAborted<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onData", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_onData<SSL>));
-
+            
             /* QUIC has a lot of functions unimplemented */
             if constexpr (SSL != 2) {
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getWriteOffset", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getWriteOffset<SSL>));
@@ -561,6 +599,7 @@ struct HttpResponseWrapper {
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getProxiedRemoteAddressAsText", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getProxiedRemoteAddressAsText<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "pause", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_pause<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "resume", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_resume<SSL>));
+                resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "streamFile", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_streamFile<SSL>));
             }
         }
 
