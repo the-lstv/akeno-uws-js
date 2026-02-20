@@ -15,10 +15,13 @@
  * limitations under the License.
  */
 
+#pragma once
+
 #include "akeno/App.h"
 #include "Http3App.h"
 #include "Utilities.h"
 #include "akeno/Router.h"
+#include "akeno/Misc.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -297,29 +300,66 @@ struct HttpResponseWrapper {
 
         Isolate *isolate = args.GetIsolate();
 
-        std::string status = "500";
-        if (args.Length() >= 1 && !args[0]->IsUndefined() && !args[0]->IsNull()) {
-            status = toUtf8String(isolate, args[0]);
+        std::string_view status = "500";
+        if (args.Length() >= 1) {
+            NativeString statusArg(isolate, args[0]);
+            if (statusArg.isInvalid(args)) {
+                return;
+            }
+            status = statusArg.getString();
         }
 
-        if (status.empty()) {
-            status = "500";
+        std::string_view message(status);
+        if (args.Length() >= 2) {
+            NativeString messageArg(isolate, args[1]);
+            if (messageArg.isInvalid(args)) {
+                return;
+            }
+            message = messageArg.getString();
         }
 
-        std::string message;
-        if (args.Length() >= 2 && !args[1]->IsUndefined() && !args[1]->IsNull()) {
-            message = toUtf8String(isolate, args[1]);
+        std::string_view title;
+        if (args.Length() >= 3) {
+            NativeString titleString(isolate, args[2]);
+            if (titleString.isInvalid(args)) {
+                return;
+            }
+            title = titleString.getString();
         }
 
-        std::string title;
-        if (args.Length() >= 3 && !args[2]->IsUndefined() && !args[2]->IsNull()) {
-            title = toUtf8String(isolate, args[2]);
-        }
-
+        assumeCorked();
         Akeno::sendErrorPage(res, status, message, title);
 
         invalidateResObject(args);
-        args.GetReturnValue().Set(args.This());
+    }
+
+    template <int PROTOCOL>
+    static void res_sendJSONError(const FunctionCallbackInfo<Value> &args) {
+        auto *res = getHttpResponse<PROTOCOL>(args);
+        if (!res) {
+            return;
+        }
+
+        Isolate *isolate = args.GetIsolate();
+        NativeString message(isolate, args[0]);
+        if (message.isInvalid(args)) {
+            return;
+        }
+
+        int code = args.Length() >= 2 ? (int) args[1]->NumberValue(isolate->GetCurrentContext()).ToChecked() : 400;
+
+        std::string_view status = uWS::HTTP_400_BAD_REQUEST;
+        if (args.Length() >= 3 && !args[2]->IsUndefined() && !args[2]->IsNull()) {
+            NativeString statusArg(isolate, args[2]);
+            if (!statusArg.isInvalid(args)) {
+                status = statusArg.getString();
+            }
+        }
+
+        assumeCorked();
+        Akeno::sendJSONError(res, message.getString(), code, status);
+
+        invalidateResObject(args);
     }
 
     /* Takes string or arraybuffer, returns this */
@@ -433,6 +473,24 @@ struct HttpResponseWrapper {
             bool ok = res->write(data.getString());
 
             args.GetReturnValue().Set(Boolean::New(isolate, ok));
+        }
+    }
+
+    /* Takes data, returns this, use with caution */
+    template <int PROTOCOL>
+    static void res_writeRaw(const FunctionCallbackInfo<Value> &args) {
+        Isolate *isolate = args.GetIsolate();
+        auto *res = getHttpResponse<PROTOCOL>(args);
+        if (res) {
+            NativeString data(args.GetIsolate(), args[0]);
+            if (data.isInvalid(args)) {
+                return;
+            }
+
+            assumeCorked();
+            res->writeRaw(data.getString());
+
+            args.GetReturnValue().Set(args.This());
         }
     }
 
@@ -577,6 +635,7 @@ struct HttpResponseWrapper {
         if constexpr (SSL != 3) {
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "setDefaultErrorPage", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_setDefaultErrorPage<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "sendErrorPage", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_sendErrorPage<SSL>));
+            resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "sendJSONError", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_sendJSONError<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "writeStatus", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_writeStatus<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "endWithoutBody", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_endWithoutBody<SSL>));
             resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "tryEnd", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_tryEnd<SSL>));
@@ -589,6 +648,7 @@ struct HttpResponseWrapper {
             
             /* QUIC has a lot of functions unimplemented */
             if constexpr (SSL != 2) {
+                resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "writeRaw", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_writeRaw<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getWriteOffset", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getWriteOffset<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getRemoteAddress", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getRemoteAddress<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "cork", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_cork<SSL>));

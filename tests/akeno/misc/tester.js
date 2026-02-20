@@ -401,5 +401,6 @@ module.exports = {
     paint,
     EXPECT_MATCH,
     uws,
+    app,
     WRITE_VALUE: (v) => (r, q) => { q.end(v); }
 };

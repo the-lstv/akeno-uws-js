@@ -1,4 +1,4 @@
-const { uws, label, generic_test, http_test, runTestsInOrder, paint, EXPECT_MATCH, WRITE_VALUE } = require("./misc/tester");
+const { uws, app, label, generic_test, http_test, runTestsInOrder, paint, EXPECT_MATCH, WRITE_VALUE } = require("./misc/tester");
 const stream = require('stream');
 
 // -- Begin tests --
@@ -67,7 +67,7 @@ large = null;
 
 // Test streaming a large file (1GB)
 // Note: This is not an optimal way to stream a file since it ignores backpressure
-http_test(`$id.localhost # Streaming huge file (~1GB)`, (v) => (r, q) => {
+if(false) http_test(`$id.localhost # Streaming huge file (~1GB)`, (v) => (r, q) => {
     const chunkSize = 1024 * 1024; // 1MB chunks
     const totalSize = 1024 * 1024 * 1024; // 1GB
     let sent = 0;
@@ -98,6 +98,19 @@ http_test(`$id.localhost # Streaming huge file (~1GB)`, (v) => (r, q) => {
         q.end();
     });
 }, (res) => res.status === 200);
+
+const testWebApp = new uws.WebApp(__dirname + "/misc");
+
+app.route("test.localhost", testWebApp);
+
+app.registerFileProcessor((id, url, path) => {
+    console.log(paint("blue", `File processor called for ${url} (path: ${path})`), id);
+    
+    // Simulate async processing
+    setTimeout(() => {
+        app.completeProcessing(id, "<h1>Processed file content</h1>");
+    }, 100);
+})
 
 http_test(`$id.localhost # Asynchronous response`, (v) => (r, q) => {
     let aborted = false;

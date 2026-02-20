@@ -24,3 +24,7 @@ build.w.c
 zlib*
 
 .vscode
+.idea
+.cache
+.clangd
+TODO.md

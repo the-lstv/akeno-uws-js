@@ -513,7 +513,7 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
     parser->ctx.template_enabled = (args.Length() > 3 && args[3]->IsBoolean()) ? args[3]->BooleanValue(isolate) : false;
 
     HTMLParserUserData userData(isolate, ctxObject);
-    Akeno::FileCache *cache = nullptr;
+    Akeno::FileCache::CacheEntry *cache = nullptr;
 
     cache = parser->ctx.fromFile(filePath, &userData, appPath);
     if (!cache) {
@@ -521,7 +521,7 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
         return;
     }
 
-    auto resultPtr = std::make_shared<std::string>(std::move(parser->ctx.exportCopy(std::shared_ptr<Akeno::FileCache>(cache, [](Akeno::FileCache *) {}))));
+    auto resultPtr = std::make_shared<std::string>(std::move(parser->ctx.exportCopy(cache)));
     auto *storage = new std::shared_ptr<std::string>(std::move(resultPtr));
 
     auto maybeBuffer = node::Buffer::New(
@@ -539,7 +539,23 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
         return;
     }
 
-    args.GetReturnValue().Set(maybeBuffer.ToLocalChecked());
+    Local<Array> pathsArray;
+    if (cache && cache->shared) {
+        const auto &paths = cache->shared->paths;
+        pathsArray = Array::New(isolate, static_cast<int>(paths.size()));
+        for (size_t i = 0; i < paths.size(); ++i) {
+            const auto &pathInfo = paths[i];
+            Local<String> pathValue = String::NewFromUtf8(isolate, pathInfo.path.data(), NewStringType::kNormal, static_cast<int>(pathInfo.path.size())).ToLocalChecked();
+            pathsArray->Set(isolate->GetCurrentContext(), static_cast<uint32_t>(i), pathValue).ToChecked();
+        }
+    } else {
+        pathsArray = Array::New(isolate, 0);
+    }
+
+    Local<Array> result = Array::New(isolate, 2);
+    result->Set(isolate->GetCurrentContext(), 0, maybeBuffer.ToLocalChecked()).ToChecked();
+    result->Set(isolate->GetCurrentContext(), 1, pathsArray).ToChecked();
+    args.GetReturnValue().Set(result);
 }
 
 static void Akeno_HTMLParser_fromString(const FunctionCallbackInfo<Value> &args) {

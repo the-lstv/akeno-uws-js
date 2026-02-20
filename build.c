@@ -23,6 +23,7 @@ const char *X64 = "x64";
 
 int addon_only = 0;
 int latest_only = 0;
+int debug_mode = 0;
 char *selected_version = NULL;
 
 int exists(const char *fname) {
@@ -148,8 +149,11 @@ void build_boringssl(const char *arch) {
 /* Build for Unix systems */
 void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const char *arch) {
 
-    char *c_shared = "-DWIN32_LEAN_AND_MEAN -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/boringssl/include -pthread -DLIBUS_USE_OPENSSL -flto -O3 -c -fPIC -I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c";
-    char *cpp_shared = "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/boringssl/include -pthread -DLIBUS_USE_OPENSSL -flto -O3 -c -fPIC -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp";
+    const char *opt_flags = debug_mode ? "-g -O0" : "-O3";
+    char c_shared[1024];
+    char cpp_shared[1024];
+    snprintf(c_shared, sizeof(c_shared), "-DWIN32_LEAN_AND_MEAN -DLIBUS_USE_LIBUV -DUWS_USE_LIBDEFLATE -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/libdeflate -I uWebSockets/uSockets/boringssl/include -pthread -DLIBUS_USE_OPENSSL -flto %s -c -fPIC -I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c", opt_flags);
+    snprintf(cpp_shared, sizeof(cpp_shared), "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DUWS_USE_LIBDEFLATE -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/boringssl/include -I uWebSockets/libdeflate -pthread -DLIBUS_USE_OPENSSL -flto %s -c -fPIC -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp -static -lbrotlienc", opt_flags); // Static link so we don't need to depend
 
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
         if (selected_version && strcmp(versions[i].name, selected_version)) {
@@ -160,7 +164,7 @@ void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const
             run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
             run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
         }
-        run("%s -pthread -flto -O3 *.o uWebSockets/uSockets/boringssl/%s/ssl/libssl.a uWebSockets/uSockets/boringssl/%s/crypto/libcrypto.a uWebSockets/uSockets/lsquic/%s/src/liblsquic/liblsquic.a -std=c++20 -shared %s -o dist/uws_%s_%s_%s.node", cpp_compiler, arch, arch, arch, cpp_linker, os, arch, versions[i].abi);
+        run("%s -pthread -flto %s *.o uWebSockets/uSockets/boringssl/%s/ssl/libssl.a uWebSockets/uSockets/boringssl/%s/crypto/libcrypto.a uWebSockets/uSockets/lsquic/%s/src/liblsquic/liblsquic.a -std=c++20 -shared %s -o dist/uws_%s_%s_%s.node", cpp_compiler, opt_flags, arch, arch, arch, cpp_linker, os, arch, versions[i].abi);
 
         if(addon_only || latest_only) {
             break; // Only build for one version
@@ -178,8 +182,11 @@ void copy_files() {
 
 /* Special case for windows */
 void build_windows(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const char *arch) {
-    char *c_shared = "-DWIN32_LEAN_AND_MEAN -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/lsquic/wincompat -I uWebSockets/uSockets/boringssl/include -DLIBUS_USE_OPENSSL -O2 -c -I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c";
-    char *cpp_shared = "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/lsquic/wincompat -I uWebSockets/uSockets/boringssl/include -DLIBUS_USE_OPENSSL -O2 -c -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp";
+    const char *opt_flags = debug_mode ? "-g -O0" : "-O3";
+    char c_shared[1024];
+    char cpp_shared[1024];
+    snprintf(c_shared, sizeof(c_shared), "-DWIN32_LEAN_AND_MEAN -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/lsquic/wincompat -I uWebSockets/uSockets/boringssl/include -DLIBUS_USE_OPENSSL %s -c -I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c", opt_flags);
+    snprintf(cpp_shared, sizeof(cpp_shared), "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DLIBUS_USE_LIBUV -DLIBUS_USE_QUIC -I uWebSockets/uSockets/lsquic/include -I uWebSockets/uSockets/lsquic/wincompat -I uWebSockets/uSockets/boringssl/include -DLIBUS_USE_OPENSSL %s -c -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp -static -lbrotlienc", opt_flags);
 
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
         if (selected_version && strcmp(versions[i].name, selected_version)) {
@@ -190,7 +197,7 @@ void build_windows(char *compiler, char *cpp_compiler, char *cpp_linker, char *o
             run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
             run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
         }
-        run("%s -O2 *.o uWebSockets/uSockets/boringssl/%s/ssl/ssl.lib uWebSockets/uSockets/boringssl/%s/crypto/crypto.lib uWebSockets/uSockets/lsquic/src/liblsquic/Debug/lsquic.lib targets/node-%s/node.lib advapi32.lib -std=c++20 -shared -o dist/uws_win32_%s_%s.node", cpp_compiler, arch, arch, versions[i].name, arch, versions[i].abi);
+        run("%s %s *.o uWebSockets/uSockets/boringssl/%s/ssl/ssl.lib uWebSockets/uSockets/boringssl/%s/crypto/crypto.lib uWebSockets/uSockets/lsquic/src/liblsquic/Debug/lsquic.lib targets/node-%s/node.lib advapi32.lib -std=c++20 -shared -o dist/uws_win32_%s_%s.node", cpp_compiler, opt_flags, arch, arch, versions[i].name, arch, versions[i].abi);
 
         if(addon_only || latest_only) {
             break; // Only build for one version
@@ -210,6 +217,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--latest-only")) {
             latest_only = 1;
             printf("Only building for one Node.js version.\n");
+        }
+        if (!strcmp(argv[i], "--debug")) {
+            debug_mode = 1;
+            printf("Debug build enabled (-g -O0).\n");
         }
         if (strncmp(argv[i], "--version=", 10) == 0) {
             selected_version = argv[i] + 10;

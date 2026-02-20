@@ -15,18 +15,22 @@
  * limitations under the License.
  */
 
-#ifndef ADDON_UTILITIES_H
-#define ADDON_UTILITIES_H
+#pragma once
 
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <v8.h>
 #include <memory>
 #include <unordered_map>
+#include "akeno/external/ankerl/unordered_dense.h"
 using namespace v8;
 
 namespace uWS {
     struct App;
+}
+
+namespace Akeno {
+    class WebApp;
 }
 
 /* Unfortunately we _have_ to depend on Node.js crap */
@@ -70,6 +74,27 @@ struct PerContextData {
     std::vector<std::unique_ptr<uWS::HTTPSProtocol>> sslProtocols;
 
     std::unordered_map<uWS::App *, std::shared_ptr<Global<Function>>> appObjectCallbacks;
+
+    /* WebApp instances created from JS (kept alive for the isolate lifetime) */
+    ankerl::unordered_dense::map<Akeno::WebApp *, std::shared_ptr<Akeno::WebApp>> webAppsByPtr;
+
+    /* File processor callback and pending responses for async refresh */
+    std::shared_ptr<Global<Function>> fileProcessorCallback;
+    uint64_t nextFileProcessId = 1;
+
+    struct PendingFileProcess {
+        bool ssl = false;
+        void *res = nullptr;
+        Akeno::WebApp *webApp = nullptr;
+        std::string url;
+        std::string fullPath;
+        std::string mimeType;
+        std::string ifNoneMatch;
+        std::string status;
+        int variant = 0;
+    };
+
+    ankerl::unordered_dense::map<uint64_t, PendingFileProcess> pendingFileProcesses;
 };
 
 /* Returns the resTemplate / wsTemplate index for a protocol type.
@@ -206,5 +231,3 @@ std::string extractX509PemCertificate(SSL* ssl) {
     X509_free(peerCertificate);
     return pemCertificate;
 }
-
-#endif

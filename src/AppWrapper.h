@@ -17,13 +17,33 @@
  * limitations under the License.
  */
 
+#pragma once
+
 #include "akeno/DomainHandler.h"
 #include "akeno/App.h"
 #include <v8.h>
 #include "Utilities.h"
 #include <memory>
 #include <functional>
+#include <utility>
+#include <filesystem>
+
+// todo
+#include "akeno/WebApp.h"
+
 using namespace v8;
+
+static int kWebAppTag;
+
+inline v8::Local<v8::String>
+utf8(v8::Isolate* isolate, std::string_view sv) {
+    return v8::String::NewFromUtf8(
+        isolate,
+        sv.data(),
+        v8::NewStringType::kNormal,
+        static_cast<int>(sv.size())
+    ).ToLocalChecked();
+}
 
 /**
  * WARNING: the following code is mostly still a prototype.
@@ -127,7 +147,7 @@ static inline void initReqResObjects(PerContextData *perContextData, uWS::HttpRe
 /* App wrapper functions — protocol-agnostic */
 
 /* app.route(pattern, handler) — adds a domain route. */
-/* TODO: Cleanup; the current code is mostly a PoC */
+/* TODO: This NEEDS cleanup; the current code is mostly a PoC */
 void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
     uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
 
@@ -161,7 +181,9 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             return;
         }
 
-        handler = DomainHandler::fromStaticBuffer(std::string(staticBuf.getString()));
+        std::string staticBufStr = std::string(staticBuf.getString());
+
+        handler = DomainHandler::fromStaticBuffer(staticBufStr);
 
         app->route(patternStr, std::move(handler));
         args.GetReturnValue().Set(args.This());
@@ -184,9 +206,9 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
         auto sharedHandler = [cbPtr, perContextData]<bool SSL>(uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req) {
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
-                Local<Object> reqObject;
-                Local<Object> resObject;
-                initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
+            Local<Object> reqObject;
+            Local<Object> resObject;
+            initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
 
             // IMPORTANT NOTE: We switched to the more common order "req, res" in contrast to the reverse order that µWS uses.
             // This is to align with how most other frameworks work, but it is something to keep in mind - Akeno-uWS differs from the uWS API.
@@ -207,6 +229,34 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             }
         );
     } else if (args[1]->IsObject()) {
+        Local<Object> handlerObject = Local<Object>::Cast(args[1]);
+
+        /* Fast-path: WebApp wrapper object (routes through C++ WebServer) */
+        if (handlerObject->InternalFieldCount() >= 2 &&
+            handlerObject->GetAlignedPointerFromInternalField(1) == (void *)&kWebAppTag) {
+
+            Akeno::WebApp *webAppPtr = (Akeno::WebApp *) handlerObject->GetAlignedPointerFromInternalField(0);
+            if (!webAppPtr) {
+                std::cerr << "Warning: Attempted to route to a WebApp with a null pointer. Make sure your WebApp wrapper object is valid and properly initialized. See documentation for app.registerWebApp and consult the user manual." << std::endl;
+                args.GetReturnValue().Set(args.This());
+                return;
+            }
+
+            /* This function requires perContextData */
+            auto *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+            auto it = perContextData->webAppsByPtr.find(webAppPtr);
+            if (it == perContextData->webAppsByPtr.end()) {
+                std::cerr << "Warning: Attempted to route to a WebApp that is not registered. Make sure to register your WebApp using app.registerWebApp() before routing to it. See documentation for app.registerWebApp and consult the user manual." << std::endl;
+                args.GetReturnValue().Set(args.This());
+                return;
+            }
+
+            handler = DomainHandler::fromWebApp(it->second);
+            app->route(patternStr, std::move(handler));
+            args.GetReturnValue().Set(args.This());
+            return;
+        }
+
         /* This function requires perContextData */
         auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
         auto &callbackPtr = perContextData->appObjectCallbacks[app];
@@ -218,18 +268,20 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
         objectPtr->Reset(isolate, Local<Object>::Cast(args[1]));
 
         auto sharedHandler = [objectPtr, callbackPtr, perContextData]<bool SSL>(uWS::HttpResponse<SSL> *res, uWS::HttpRequest *req) {
+            if (!callbackPtr || callbackPtr->IsEmpty()) {
+                res->end();
+                return;
+            }
+
             Isolate *isolate = perContextData->isolate;
             HandleScope hs(isolate);
-                Local<Object> reqObject;
-                Local<Object> resObject;
-                initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
-
-            if (callbackPtr && !callbackPtr->IsEmpty()) {
-                Local<Function> onObjectLf = Local<Function>::New(isolate, *callbackPtr);
-                Local<Object> objectValue = Local<Object>::New(isolate, *objectPtr);
-                Local<Value> argv[] = {reqObject, resObject, objectValue};
-                CallJS(isolate, onObjectLf, 3, argv);
-            }
+            Local<Object> reqObject;
+            Local<Object> resObject;
+            initReqResObjects<SSL>(perContextData, res, req, &reqObject, &resObject);
+            Local<Function> onObjectLf = Local<Function>::New(isolate, *callbackPtr);
+            Local<Object> objectValue = Local<Object>::New(isolate, *objectPtr);
+            Local<Value> argv[] = {reqObject, resObject, objectValue};
+            CallJS(isolate, onObjectLf, 3, argv);
 
             reqObject->SetAlignedPointerInInternalField(0, nullptr);
         };
@@ -250,6 +302,410 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
 
     app->route(patternStr, std::move(handler));
     args.GetReturnValue().Set(args.This());
+}
+
+/* app.registerFileProcessor(cb) — cb(id, url, path) */
+void uWS_App_registerFileProcessor(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(1, args)) {
+        return;
+    }
+
+    auto *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    if (args[0]->IsNull() || args[0]->IsUndefined()) {
+        perContextData->fileProcessorCallback.reset();
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    Callback checkedCallback(isolate, args[0]);
+    if (checkedCallback.isInvalid(args)) {
+        return;
+    }
+
+    if (!perContextData->fileProcessorCallback) {
+        perContextData->fileProcessorCallback = std::make_shared<Global<Function>>();
+    }
+
+    UniquePersistent<Function> cb = checkedCallback.getFunction();
+    perContextData->fileProcessorCallback->Reset();
+    perContextData->fileProcessorCallback->Reset(isolate, Local<Function>::New(isolate, cb));
+
+    args.GetReturnValue().Set(args.This());
+}
+
+// Temporary
+static inline bool extractBufferToString(Isolate *isolate, const Local<Value> &value, std::string *out) {
+    if (value->IsArrayBuffer()) {
+        Local<ArrayBuffer> ab = Local<ArrayBuffer>::Cast(value);
+        std::shared_ptr<BackingStore> bs = ab->GetBackingStore();
+        out->assign((const char *) bs->Data(), bs->ByteLength());
+        return true;
+    }
+
+    if (value->IsArrayBufferView()) {
+        Local<ArrayBufferView> view = value.As<ArrayBufferView>();
+        std::shared_ptr<BackingStore> bs = view->Buffer()->GetBackingStore();
+        size_t offset = view->ByteOffset();
+        size_t length = view->ByteLength();
+        out->assign((const char *) bs->Data() + offset, length);
+        return true;
+    }
+
+    if (value->IsString()) {
+        NativeString s(isolate, value);
+        out->assign(s.getString());
+        return true;
+    }
+
+    return false;
+}
+
+/* app.completeProcessing(id, result, [linkedPaths]) */
+// TODO: We could respond to all pending requests to avoid duplicate work
+// TODO: Pass the WebApp object if possible
+void uWS_App_completeProcessing(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(2, args)) {
+        return;
+    }
+
+    auto *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    uint64_t id = (uint64_t) args[0]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
+    auto it = perContextData->pendingFileProcesses.find(id);
+    if (it == perContextData->pendingFileProcesses.end()) {
+        args.GetReturnValue().Set(Boolean::New(isolate, false));
+        return;
+    }
+
+    PerContextData::PendingFileProcess pending = std::move(it->second);
+    perContextData->pendingFileProcesses.erase(it);
+
+    if (!pending.webApp) {
+        args.GetReturnValue().Set(Boolean::New(isolate, false));
+        return;
+    }
+
+    // TODO: if buffer is "true", we shuold read the file directly (no processing done from JS)
+    // As of now JS always sends the file buffer which is inefficient (though only done for the first request)
+    // Problem is path handling which will be resolved later at some point but currently causes issues
+
+    std::string buffer;
+    if (!extractBufferToString(isolate, args[1], &buffer)) {
+        args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(
+            String::NewFromUtf8(isolate, "completeProcessing() requires result as String/ArrayBuffer/TypedArray", NewStringType::kNormal).ToLocalChecked())));
+        return;
+    }
+
+    std::vector<std::string> linkedPaths;
+    if (args.Length() > 2 && args[2]->IsArray()) {
+        Local<Array> arr = Local<Array>::Cast(args[2]);
+        linkedPaths.reserve(arr->Length());
+        for (uint32_t i = 0; i < arr->Length(); i++) {
+            Local<Value> v;
+            if (!arr->Get(isolate->GetCurrentContext(), i).ToLocal(&v) || !v->IsString()) {
+                continue;
+            }
+            v8::String::Utf8Value path(isolate, v);
+            linkedPaths.emplace_back(*path, static_cast<size_t>(path.length()));
+            // TODO: Fix linked paths
+            // std::cout << "Registered linked path: " << linkedPaths.back() << std::endl;
+        }
+    }
+
+    std::string mimeType = pending.mimeType;
+    if (args.Length() > 3 && args[3]->IsString()) {
+        v8::String::Utf8Value mt(isolate, args[3]);
+        if (*mt && mt.length() > 0) {
+            mimeType.assign(*mt, static_cast<size_t>(mt.length()));
+        }
+    }
+
+    linkedPaths.emplace_back(pending.fullPath);
+    Akeno::FileCache::CacheEntry* entry = pending.webApp->fileCache.update(pending.fullPath, std::move(buffer), linkedPaths, mimeType);
+
+    if(!pending.res) {
+        // Request was aborted, but we can still store cache for future requests
+        args.GetReturnValue().Set(Boolean::New(isolate, true));
+        return;
+    }
+
+    // Now finally try to respond to the pending request
+    // TODO: We *could* try to send a 304 but this is enough and more reliable+ we shouldn't rely on req here
+    if (pending.ssl) {
+        auto *res = (uWS::HttpResponse<true> *) pending.res;
+        if (!pending.webApp->fileCache.tryServeWithCompression(pending.fullPath, pending.variant, res, pending.status)) {
+            res->end();
+        }
+    } else {
+        auto *res = (uWS::HttpResponse<false> *) pending.res;
+        if (!pending.webApp->fileCache.tryServeWithCompression(pending.fullPath, pending.variant, res, pending.status)) {
+            res->end();
+        }
+    }
+
+    args.GetReturnValue().Set(Boolean::New(isolate, true));
+}
+
+// Shared helper to parse options and applying them to a WebApp instance
+void configureWebApp(Isolate *isolate, Akeno::WebApp *webApp, Local<Object> optionsObject) {
+    Local<Context> context = isolate->GetCurrentContext();
+
+    // browserCompatibility: [int, int, bool]
+    MaybeLocal<Value> maybeCompat = optionsObject->Get(context, String::NewFromUtf8(isolate, "browserCompatibility", NewStringType::kNormal).ToLocalChecked());
+    if (!maybeCompat.IsEmpty() && maybeCompat.ToLocalChecked()->IsArray()) {
+        Local<Array> compatArr = Local<Array>::Cast(maybeCompat.ToLocalChecked());
+        if (compatArr->Length() >= 3) {
+            int botScore = compatArr->Get(context, 0).ToLocalChecked()->Int32Value(context).ToChecked();
+            int humanScore = compatArr->Get(context, 1).ToLocalChecked()->Int32Value(context).ToChecked();
+            bool enable = compatArr->Get(context, 2).ToLocalChecked()->BooleanValue(isolate);
+            webApp->options.browserCompatibility = std::make_tuple(botScore, humanScore, enable);
+        }
+    }
+
+    // root: string
+    MaybeLocal<Value> maybeRoot = optionsObject->Get(context, String::NewFromUtf8(isolate, "root", NewStringType::kNormal).ToLocalChecked());
+    if (!maybeRoot.IsEmpty() && maybeRoot.ToLocalChecked()->IsString()) {
+        NativeString rootStr(isolate, maybeRoot.ToLocalChecked());
+        webApp->root = rootStr.getString();
+    }
+
+    // enabled: bool
+    MaybeLocal<Value> maybeEnabled = optionsObject->Get(context, String::NewFromUtf8(isolate, "enabled", NewStringType::kNormal).ToLocalChecked());
+    if (!maybeEnabled.IsEmpty() && !maybeEnabled.ToLocalChecked()->IsUndefined()) {
+        webApp->enabled = maybeEnabled.ToLocalChecked()->BooleanValue(isolate);
+    }
+
+    // redirectToHttps: bool
+    MaybeLocal<Value> maybeRedirect = optionsObject->Get(context, String::NewFromUtf8(isolate, "redirectToHttps", NewStringType::kNormal).ToLocalChecked());
+    if (!maybeRedirect.IsEmpty() && !maybeRedirect.ToLocalChecked()->IsUndefined()) {
+        webApp->options.redirectToHttps = maybeRedirect.ToLocalChecked()->BooleanValue(isolate);
+    }
+}
+
+void uWS_WebApp_setOptions(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+
+    if (missingArguments(1, args)) {
+        return;
+    }
+
+    Local<Object> self = args.This();
+    if (self->InternalFieldCount() < 2 || self->GetAlignedPointerFromInternalField(1) != (void *)&kWebAppTag) {
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    Akeno::WebApp *webApp = (Akeno::WebApp *) self->GetAlignedPointerFromInternalField(0);
+    if (!webApp) {
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    if (!args[0]->IsObject()) {
+        args.GetReturnValue().Set(args.This());
+        return;
+    }
+
+    configureWebApp(isolate, webApp, Local<Object>::Cast(args[0]));
+
+    args.GetReturnValue().Set(args.This());
+}
+
+/* uWS.WebApp(path, [options]) */
+void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    auto *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
+
+    if (missingArguments(1, args)) {
+        return;
+    }
+
+    NativeString pathValue(isolate, args[0]);
+    if (pathValue.isInvalid(args)) {
+        return;
+    }
+
+    // Default options
+    Akeno::WebAppOptions options{};
+    auto webAppShared = std::make_shared<Akeno::WebApp>(std::string(pathValue.getString()), options);
+    Akeno::WebApp *webApp = webAppShared.get();
+
+    // Apply options if provided
+    if (args.Length() > 1 && args[1]->IsObject()) {
+        configureWebApp(isolate, webApp, Local<Object>::Cast(args[1]));
+    }
+
+    /* Wire file processor hook (optional, callback stored on PerContextData) */
+    webApp->fileProcessorHttp = [perContextData, webApp](uWS::HttpResponse<false> *res, uWS::HttpRequest *req, std::string_view url, std::string_view fullPath, std::string_view mimeType, int variant, std::string_view status) -> bool {
+        if (!perContextData->fileProcessorCallback || perContextData->fileProcessorCallback->IsEmpty()) {
+            return false;
+        }
+
+        uint64_t id = perContextData->nextFileProcessId++;
+        PerContextData::PendingFileProcess pending;
+        pending.ssl = false;
+        pending.res = res;
+        pending.webApp = webApp;
+        pending.url.assign(url.data(), url.size());
+        pending.fullPath.assign(fullPath.data(), fullPath.size());
+        pending.mimeType.assign(mimeType.data(), mimeType.size());
+        pending.status.assign(status.data(), status.size());
+        pending.variant = variant;
+
+        perContextData->pendingFileProcesses.emplace(id, std::move(pending));
+
+        res->onAborted([perContextData, id]() {
+            perContextData->pendingFileProcesses.erase(id);
+        });
+
+        Isolate *isolate = perContextData->isolate;
+        HandleScope hs(isolate);
+        Local<Function> cb = Local<Function>::New(isolate, *perContextData->fileProcessorCallback);
+        Local<Value> argv[] = {Number::New(isolate, (double) id), utf8(isolate, url), utf8(isolate, fullPath), utf8(isolate, mimeType)};
+        CallJS(isolate, cb, 4, argv);
+        return true;
+    };
+
+    webApp->fileProcessorHttps = [perContextData, webApp](uWS::HttpResponse<true> *res, uWS::HttpRequest *req, std::string_view url, std::string_view fullPath, std::string_view mimeType, int variant, std::string_view status) -> bool {
+        if (!perContextData->fileProcessorCallback || perContextData->fileProcessorCallback->IsEmpty()) {
+            return false;
+        }
+
+        uint64_t id = perContextData->nextFileProcessId++;
+        PerContextData::PendingFileProcess pending;
+        pending.ssl = true;
+        pending.res = res;
+        pending.webApp = webApp;
+        pending.url.assign(url.data(), url.size());
+        pending.fullPath.assign(fullPath.data(), fullPath.size());
+        pending.mimeType.assign(mimeType.data(), mimeType.size());
+        pending.status.assign(status.data(), status.size());
+        pending.variant = variant;
+
+        perContextData->pendingFileProcesses.emplace(id, std::move(pending));
+
+        res->onAborted([perContextData, id]() {
+            perContextData->pendingFileProcesses.erase(id);
+        });
+
+        Isolate *isolate = perContextData->isolate;
+        HandleScope hs(isolate);
+        Local<Function> cb = Local<Function>::New(isolate, *perContextData->fileProcessorCallback);
+        Local<Value> argv[] = {Number::New(isolate, (double) id), utf8(isolate, url), utf8(isolate, fullPath), utf8(isolate, mimeType)};
+        CallJS(isolate, cb, 4, argv);
+        return true;
+    };
+
+    /* Keep alive and allow lookup by raw pointer */
+    perContextData->webAppsByPtr.emplace(webApp, webAppShared);
+
+    Local<FunctionTemplate> webAppTemplate = FunctionTemplate::New(isolate);
+    webAppTemplate->SetClassName(String::NewFromUtf8(isolate, "uWS.WebApp", NewStringType::kNormal).ToLocalChecked());
+    webAppTemplate->InstanceTemplate()->SetInternalFieldCount(2);
+
+    webAppTemplate->PrototypeTemplate()->Set(
+        String::NewFromUtf8(isolate, "setOptions", NewStringType::kNormal).ToLocalChecked(),
+        FunctionTemplate::New(isolate, uWS_WebApp_setOptions, args.Data()));
+
+    webAppTemplate->PrototypeTemplate()->Set(
+        String::NewFromUtf8(isolate, "applyAttributes", NewStringType::kNormal).ToLocalChecked(),
+        FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
+            Isolate *isolate = args.GetIsolate();
+            if (missingArguments(2, args)) return;
+            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            if (!webApp) return;
+
+            NativeString pathVal(isolate, args[0]);
+            if (pathVal.isInvalid(args)) return;
+
+            if (args[1]->IsNull() || args[1]->IsUndefined()) {
+                webApp->removeAttributes(pathVal.getString());
+            } else if (args[1]->IsObject()) {
+                Local<Context> ctx = isolate->GetCurrentContext();
+                Local<Object> obj = args[1].As<Object>();
+                
+                Akeno::PathAttributes attr; // Default constructed
+                
+                Local<Value> denyVal;
+                if (obj->Get(ctx, String::NewFromUtf8(isolate, "deny", NewStringType::kNormal).ToLocalChecked()).ToLocal(&denyVal)) {
+                    if (!denyVal->IsUndefined()) attr.deny = denyVal->BooleanValue(isolate);
+                }
+
+                Local<Value> typeVal;
+                if (obj->Get(ctx, String::NewFromUtf8(isolate, "type", NewStringType::kNormal).ToLocalChecked()).ToLocal(&typeVal)) {
+                    if (!typeVal->IsUndefined()) attr.transformType = (uint8_t) typeVal->Uint32Value(ctx).FromMaybe(0);
+                }
+
+                Local<Value> targetVal;
+                if (obj->Get(ctx, String::NewFromUtf8(isolate, "target", NewStringType::kNormal).ToLocalChecked()).ToLocal(&targetVal)) {
+                    if (!targetVal->IsUndefined() && targetVal->IsString()) {
+                         NativeString tVal(isolate, targetVal);
+                         attr.transformTarget = tVal.getString();
+                    }
+                }
+
+                webApp->applyAttributes(pathVal.getString(), attr);
+            }
+            
+            args.GetReturnValue().Set(args.This());
+        }, args.Data()));
+
+    webAppTemplate->PrototypeTemplate()->Set(
+        String::NewFromUtf8(isolate, "removeAttributes", NewStringType::kNormal).ToLocalChecked(),
+        FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
+            Isolate *isolate = args.GetIsolate();
+            if (missingArguments(1, args)) return;
+            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            if (!webApp) return;
+
+            NativeString pathVal(isolate, args[0]);
+            if (pathVal.isInvalid(args)) return;
+
+            webApp->removeAttributes(pathVal.getString());
+            args.GetReturnValue().Set(args.This());
+        }, args.Data()));
+
+    webAppTemplate->PrototypeTemplate()->Set(
+        String::NewFromUtf8(isolate, "clearAttributes", NewStringType::kNormal).ToLocalChecked(),
+        FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
+            Isolate *isolate = args.GetIsolate();
+            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            if (!webApp) return;
+            
+            webApp->clearAttributes();
+            args.GetReturnValue().Set(args.This());
+        }, args.Data()));
+
+    webAppTemplate->PrototypeTemplate()->Set(
+        String::NewFromUtf8(isolate, "setErrorPage", NewStringType::kNormal).ToLocalChecked(),
+        FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
+            Isolate *isolate = args.GetIsolate();
+            if (missingArguments(2, args)) return;
+            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            if (!webApp) return;
+
+            int code = args[0]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
+            NativeString pageVal(isolate, args[1]);
+            if (pageVal.isInvalid(args)) return;
+
+            webApp->setErrorPage(code, std::string(pageVal.getString()));
+            args.GetReturnValue().Set(args.This());
+        }, args.Data()));
+
+    Local<Object> localWebApp = webAppTemplate->GetFunction(isolate->GetCurrentContext())
+                                   .ToLocalChecked()
+                                   ->NewInstance(isolate->GetCurrentContext())
+                                   .ToLocalChecked();
+
+    localWebApp->SetAlignedPointerInInternalField(0, webApp);
+    localWebApp->SetAlignedPointerInInternalField(1, (void *) &kWebAppTag);
+
+    args.GetReturnValue().Set(localWebApp);
 }
 
 /* app.unroute(pattern) — removes a domain route. */
@@ -368,6 +824,8 @@ void uWS_App_constructor(const FunctionCallbackInfo<Value> &args) {
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onObject", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_onObject, args.Data()));
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "publish", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_publish, args.Data()));
     appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "numSubscribers", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_numSubscribers, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "registerFileProcessor", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_registerFileProcessor, args.Data()));
+    appTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "completeProcessing", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_completeProcessing, args.Data()));
 
     Local<Object> localApp = appTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
 

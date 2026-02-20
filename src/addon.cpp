@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+// Important TODO: keep version in sync with package.json
+#define AKENO_VERSION "1.6.9-beta"
+
 /* We are only allowed to depend on µWS and V8 in this layer. */
 #include "akeno/DomainHandler.h"
 #include "akeno/App.h"
@@ -31,6 +34,9 @@ using namespace v8;
 #include "WebSocketWrapper.h"
 #include "HttpResponseWrapper.h"
 #include "HttpRequestWrapper.h"
+
+#include "akeno/WebApp.h"
+
 #include "AppWrapper.h"
 #include "HTMLParserWrapper.h"
 #include "akeno/Router.h"
@@ -38,6 +44,7 @@ using namespace v8;
 #include <numeric>
 #include <functional>
 
+// TODO:
 Akeno::DomainRouter<DomainHandler> domainRouter;
 
 // Windows is crap
@@ -429,6 +436,9 @@ PerContextData *Main(Local<Object> exports) {
 
     /* App - protocol-agnostic routing context */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+
+    /* WebApp - Akeno web application wrapper */
+    exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "WebApp", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_WebApp_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     
     /* Protocol constructors */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "HTTPProtocol", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_constructor<uWS::HTTPProtocol>, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
