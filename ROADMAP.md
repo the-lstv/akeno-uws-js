@@ -1,0 +1,7 @@
+- [ ] Reimplement DeclarativeResponse
+- [ ] Fix Connection: close workaround for error handling
+- [ ] Fix broken static (buffer) responses
+- [ ] Fix Http3 support
+- [ ] Fix certain implementations
+- [ ] More tests (a lot more tests)
+- [ ] Fix <html> tag bug in parser

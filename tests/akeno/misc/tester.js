@@ -2,7 +2,7 @@
  * This is a testing utility that just does whatever
  */
 
-const uws = require("../../../dist/uws");
+const uws = require("../../../dist/akeno");
 const http = require("http");
 const https = require("https");
 
@@ -177,30 +177,57 @@ httpsProtocol.listen(p2, (socket) => console.log(socket)).bind(app);
 let tspmo = [];
 
 // Helper to make HTTP/HTTPS requests with custom Host header
-function makeRequest(protocol, port, host) {
+function makeRequest(protocol, port, host, requestOptions = {}) {
     return new Promise((resolve, reject) => {
         const client = protocol === 'https' ? https : http;
+        const method = requestOptions.method || 'GET';
+        const path = requestOptions.path || '/';
+        const headers = Object.assign({}, requestOptions.headers || {});
+        headers.Host = host;
+
+        const hasContentLength = Object.keys(headers).some((key) => key.toLowerCase() === 'content-length');
+        const body = requestOptions.body;
+        const bodyIsArray = Array.isArray(body);
+        if (method !== 'GET' && body !== undefined && body !== null && !bodyIsArray && !hasContentLength) {
+            headers['Content-Length'] = toBuffer(body).length;
+        }
+
         const options = {
             hostname: '127.0.0.1',
             port: port,
-            path: '/',
-            method: 'GET',
-            headers: {
-                'Host': host
-            },
+            path,
+            method,
+            headers,
             rejectUnauthorized: false // For self-signed certs
         };
+
+        const startedAt = process.hrtime.bigint();
 
         const req = client.request(options, (res) => {
             const chunks = [];
             res.on('data', (chunk) => chunks.push(chunk));
             res.on('end', () => {
                 const buffer = Buffer.concat(chunks);
-                resolve({ status: res.statusCode, buffer });
+                const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+                resolve({ status: res.statusCode, buffer, text: buffer.toString(), headers: res.headers, durationMs, method, path });
             });
         });
 
         req.on('error', reject);
+
+        if (bodyIsArray) {
+            for (const chunk of body) {
+                req.write(chunk);
+            }
+            req.end();
+            return;
+        }
+
+        if (body !== undefined && body !== null) {
+            req.end(body);
+            return;
+        }
+
         req.end();
     });
 }
@@ -402,5 +429,6 @@ module.exports = {
     EXPECT_MATCH,
     uws,
     app,
+    makeRequest,
     WRITE_VALUE: (v) => (r, q) => { q.end(v); }
 };

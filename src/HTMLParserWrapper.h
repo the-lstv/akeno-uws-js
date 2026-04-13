@@ -364,6 +364,31 @@ static void Akeno_HTMLParser_context_getTagName(const FunctionCallbackInfo<Value
     args.GetReturnValue().Set(Null(isolate));
 }
 
+static void Akeno_HTMLParser_context_getTagAttribute(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    HTMLParserWrapper *parser = getParserWrapper(args);
+
+    if (!parser) {
+        ThrowTypeError(isolate, "Parser instance is not initialized.");
+        return;
+    }
+
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        ThrowTypeError(isolate, "Expected an attribute name");
+        return;
+    }
+
+    String::Utf8Value attr(isolate, args[0]);
+    std::string attrName(*attr ? *attr : "", attr.length());
+    std::string value = parser->ctx.getTagAttribute(attrName);
+    if (value.empty()) {
+        args.GetReturnValue().Set(Null(isolate));
+        return;
+    }
+
+    args.GetReturnValue().Set(String::NewFromUtf8(isolate, value.c_str(), NewStringType::kNormal).ToLocalChecked());
+}
+
 static void Akeno_HTMLParser_context_setBodyAttributes(const FunctionCallbackInfo<Value> &args) {
     Isolate *isolate = args.GetIsolate();
     HTMLParserWrapper *parser = getParserWrapper(args);
@@ -419,6 +444,7 @@ static void Akeno_HTMLParser_createContext(const FunctionCallbackInfo<Value> &ar
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "write", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_write));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onText", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_write));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getTagName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_getTagName));
+    ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getTagAttribute", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_getTagAttribute));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "setBodyAttributes", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_setBodyAttributes));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "import", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_import));
 

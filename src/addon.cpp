@@ -443,6 +443,9 @@ PerContextData *Main(Local<Object> exports) {
     /* App - protocol-agnostic routing context */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "App", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_App_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
 
+    /* Optional authenticated websocket helper */
+    // exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "AuthenticatedWebSocket", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_AuthenticatedWebSocket_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
+
     /* WebApp - Akeno web application wrapper */
     exports->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "WebApp", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_WebApp_constructor, externalPerContextData)->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()).ToChecked();
     
