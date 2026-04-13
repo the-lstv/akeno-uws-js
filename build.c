@@ -17,6 +17,22 @@
 #define IS_MACOS
 #endif
 
+/* ASAN vs. optimized build flags (used via C string literal concatenation).
+ * OPT_FLAGS / LINK_FLAGS: inserted mid-string, so each definition starts with a space.
+ * LINUX_LINK_EXTRAS: passed as a standalone argument, so no leading space.
+ * MACOS_LINK_EXTRAS: appended after "-undefined dynamic_lookup", so ASAN variant starts with a space. */
+#ifdef WITH_ASAN
+#define OPT_FLAGS " -fsanitize=address -fno-omit-frame-pointer -g -O1"
+#define LINK_FLAGS " -fsanitize=address"
+#define LINUX_LINK_EXTRAS "-fsanitize=address"
+#define MACOS_LINK_EXTRAS " -fsanitize=address"
+#else
+#define OPT_FLAGS " -flto -O3"
+#define LINK_FLAGS " -flto -O3"
+#define LINUX_LINK_EXTRAS "-static-libstdc++ -static-libgcc -s"
+#define MACOS_LINK_EXTRAS ""
+#endif
+
 const char *ARM = "arm";
 const char *ARM64 = "arm64";
 const char *X64 = "x64";
@@ -114,7 +130,13 @@ void prepare(const char *windows_lib_arch) {
         if (!exists(path)) {
             run("curl https://nodejs.org/dist/%s/win-%s/node.lib > targets/node-%s/node.lib", versions[i].name, windows_lib_arch, versions[i].name);
         }
-    
+
+        /* v8-fast-api-calls.h is missing from the Node.js header distribution; fetch the matching Node version */
+        sprintf(path, "targets/node-%s/include/node/v8-fast-api-calls.h", versions[i].name);
+        if (!exists(path)) {
+            run("curl -fL https://raw.githubusercontent.com/nodejs/node/%s/deps/v8/include/v8-fast-api-calls.h > targets/node-%s/include/node/v8-fast-api-calls.h", versions[i].name, versions[i].name);
+        }
+
         if (latest_only) {
             break;
         }
@@ -149,7 +171,7 @@ void build_lsquic(const char *arch) {
     }
 
     run("tar xzf zlib-1.3.1.tar.gz");
-    run("cd uWebSockets/uSockets/lsquic && cmake -DCMAKE_C_FLAGS=\"-DWIN32 -I..\\..\\..\\zlib-1.3.1\" -DZLIB_INCLUDE_DIR=..\\..\\..\\zlib-1.3.1 -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DBORINGSSL_DIR=../boringssl -DCMAKE_BUILD_TYPE=Release -DLSQUIC_BIN=Off -GNinja . && ninja");
+    run("cd uWebSockets/uSockets/lsquic && cmake -DCMAKE_C_FLAGS=\"-DWIN32 /wd4201 -I..\\..\\..\\zlib-1.3.1\" -DZLIB_INCLUDE_DIR=..\\..\\..\\zlib-1.3.1 -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DBORINGSSL_DIR=../boringssl -DCMAKE_BUILD_TYPE=Release -DLSQUIC_BIN=Off -GNinja . && ninja");
 #endif
 }
 
@@ -322,14 +344,14 @@ int main(int argc, char **argv) {
     /* Apple special case */
     build("clang -target x86_64-apple-macos12",
           "clang++ -stdlib=libc++ -target x86_64-apple-macos12",
-          "-undefined dynamic_lookup",
+          "-undefined dynamic_lookup" MACOS_LINK_EXTRAS,
           OS,
           X64);
 
     /* Try and build for arm64 macOS 12 */
     build("clang -target arm64-apple-macos12",
           "clang++ -stdlib=libc++ -target arm64-apple-macos12",
-          "-undefined dynamic_lookup",
+          "-undefined dynamic_lookup" MACOS_LINK_EXTRAS,
           OS,
           ARM64);
 
@@ -337,7 +359,7 @@ int main(int argc, char **argv) {
     /* Linux does not cross-compile but picks whatever arch the host is on (we run on both x64 and ARM64) */
     build("clang-18",
           "clang++-18",
-          "-static-libstdc++ -static-libgcc -s",
+          LINUX_LINK_EXTRAS,
           OS,
           arch);
 #endif

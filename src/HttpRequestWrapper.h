@@ -1,5 +1,5 @@
 /*
- * Authored by Alex Hultman, 2018-2020.
+ * Authored by Alex Hultman, 2018-2026.
  * Intellectual property of third-party.
 
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -75,7 +75,7 @@ struct HttpRequestWrapper {
                 int index = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
                 parameter = req->getParameter(index);
             } else {
-                NativeString data(args.GetIsolate(), args[0]);
+                NativeString<true> data(args.GetIsolate(), args[0]);
                 if (data.isInvalid(args)) {
                     return;
                 }
@@ -104,7 +104,7 @@ struct HttpRequestWrapper {
         Isolate *isolate = args.GetIsolate();
         auto *req = getHttpRequest<QUIC>(args);
         if (req) {
-            NativeString data(args.GetIsolate(), args[0]);
+            NativeString<true> data(args.GetIsolate(), args[0]);
             if (data.isInvalid(args)) {
                 return;
             }
@@ -162,7 +162,7 @@ struct HttpRequestWrapper {
 
             /* Do we have a key argument? */
             if (args.Length() == 1) {
-                NativeString keyString(isolate, args[0]);
+                NativeString<true> keyString(isolate, args[0]);
                 if (keyString.isInvalid(args)) {
                     return;
                 }

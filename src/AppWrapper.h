@@ -1,5 +1,5 @@
 /*
- * Authored by Alex Hultman, 2018-2021.
+ * Authored by Alex Hultman, 2018-2026.
  * Intellectual property of third-party.
 
  * Modified for Akeno: copyright (c) 2026 Lukas Zloch (https://lstv.space)
@@ -850,7 +850,12 @@ std::pair<uWS::SocketContextOptions, bool> readOptionsObject(const FunctionCallb
 
     uWS::SocketContextOptions options = {};
     thread_local std::string keyFileName, certFileName, passphrase, dhParamsFileName, caFileName, sslCiphers;
-    if (args.Length() > index) {
+    if (args.Length() > index && !args[index]->IsUndefined() && !args[index]->IsNull()) {
+
+        if (!args[index]->IsObject()) {
+            args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "Options must be an object.", NewStringType::kNormal).ToLocalChecked())));
+            return {};
+        }
 
         Local<Object> optionsObject = Local<Object>::Cast(args[index]);
 
