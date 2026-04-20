@@ -407,6 +407,24 @@ static void Akeno_HTMLParser_context_setBodyAttributes(const FunctionCallbackInf
     parser->ctx.body_attributes.assign(*attr ? *attr : "", attr.length());
 }
 
+static void Akeno_HTMLParser_context_setTemplate(const FunctionCallbackInfo<Value> &args) {
+    Isolate *isolate = args.GetIsolate();
+    HTMLParserWrapper *parser = getParserWrapper(args);
+
+    if (!parser) {
+        ThrowTypeError(isolate, "Parser instance is not initialized.");
+        return;
+    }
+
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        ThrowTypeError(isolate, "Expected a string");
+        return;
+    }
+
+    Local<Context> context = isolate->GetCurrentContext();
+    args.This()->Set(context, String::NewFromUtf8(isolate, "template", NewStringType::kNormal).ToLocalChecked(), args[0]).ToChecked();
+}
+
 static void Akeno_HTMLParser_context_import(const FunctionCallbackInfo<Value> &args) {
     Isolate *isolate = args.GetIsolate();
     HTMLParserWrapper *parser = getParserWrapper(args);
@@ -446,6 +464,7 @@ static void Akeno_HTMLParser_createContext(const FunctionCallbackInfo<Value> &ar
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getTagName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_getTagName));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getTagAttribute", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_getTagAttribute));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "setBodyAttributes", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_setBodyAttributes));
+    ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "setTemplate", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_setTemplate));
     ctxTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "import", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, Akeno_HTMLParser_context_import));
 
     Local<Object> ctxObject = ctxTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()
@@ -523,6 +542,7 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
     Local<Object> ctxObject = Local<Object>::Cast(args[1]);
 
     std::string appPath;
+    std::string dataTemplatePath;
     Local<Context> context = isolate->GetCurrentContext();
     Local<Value> dataValue = ctxObject->Get(context, String::NewFromUtf8(isolate, "data", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked();
     if (dataValue->IsObject()) {
@@ -532,6 +552,30 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
             String::Utf8Value appPathStr(isolate, pathValue);
             appPath.assign(*appPathStr ? *appPathStr : "", appPathStr.length());
         }
+
+        Local<Value> dataTemplateValue = dataObj->Get(context, String::NewFromUtf8(isolate, "template", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked();
+        if (dataTemplateValue->IsString()) {
+            String::Utf8Value dataTemplateStr(isolate, dataTemplateValue);
+            dataTemplatePath.assign(*dataTemplateStr ? *dataTemplateStr : "", dataTemplateStr.length());
+        }
+    }
+
+    std::string explicitTemplatePath;
+    if (args.Length() > 4 && args[4]->IsString()) {
+        String::Utf8Value templateArg(isolate, args[4]);
+        explicitTemplatePath.assign(*templateArg ? *templateArg : "", templateArg.length());
+    }
+
+    if (explicitTemplatePath.empty()) {
+        Local<Value> contextTemplateValue = ctxObject->Get(context, String::NewFromUtf8(isolate, "template", NewStringType::kNormal).ToLocalChecked()).ToLocalChecked();
+        if (contextTemplateValue->IsString()) {
+            String::Utf8Value contextTemplateStr(isolate, contextTemplateValue);
+            explicitTemplatePath.assign(*contextTemplateStr ? *contextTemplateStr : "", contextTemplateStr.length());
+        }
+    }
+
+    if (explicitTemplatePath.empty()) {
+        explicitTemplatePath = dataTemplatePath;
     }
 
     parser->ctx.in_markdown = isMarkdown;
@@ -541,7 +585,7 @@ static void Akeno_HTMLParser_fromFileInternal(const FunctionCallbackInfo<Value> 
     HTMLParserUserData userData(isolate, ctxObject);
     Akeno::FileCache::CacheEntry *cache = nullptr;
 
-    cache = parser->ctx.fromFile(filePath, &userData, appPath);
+    cache = parser->ctx.fromFile(filePath, &userData, appPath, true, explicitTemplatePath);
     if (!cache) {
         isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, parser->ctx.lastError.c_str(), NewStringType::kNormal).ToLocalChecked()));
         return;
