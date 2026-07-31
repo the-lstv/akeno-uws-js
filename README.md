@@ -6,7 +6,7 @@
 This is for the fork of [µWebSockets.js](https://github.com/uNetworking/uWebSockets.js) used by [Akeno](https://github.com/the-lstv/akeno), used for building and including the µWebSockets server fork as a node module.
 It moves a bunch of the JavaScript logic to C++ for slightly better performance (though it's not an enormous difference), eliminate calls to JavaScript where possible, and for the future low level cache implementation.
 
-> [!NOTE] This fork is sadly not often updated from upstream anymore, because the recent versions of uWebSockets include AI-generated code, which goes against the standards of this library. I think it is irresponsible for a critical component of this scale to include AI code in production (considering they already had AI bugs that made it to production), especially given that the library & it's developer doesn't have the best track record, and for that reason I want to ensure we aren't blindly including such code in this library.
+> [!NOTE] This fork is sadly not often updated from upstream anymore, because the recent versions of uWebSockets include AI-generated code, which goes against the standards of this library. This means I have to do more work inspecting the code before merging into Akeno. I think it is irresponsible for a critical component of this scale to include AI code in production (considering they already had AI bugs that made it to production), especially given that the library & it's developer doesn't have the best track record, and for that reason I want to ensure we aren't blindly including such code in this library. Everything will eventually be merged into Akeno-uWS, but it may take a while.
 
 ## Warning
 The state of this as of now is highly experimental and more of a proof-of-concept.

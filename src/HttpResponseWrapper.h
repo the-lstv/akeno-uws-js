@@ -611,56 +611,16 @@ struct HttpResponseWrapper {
         }
     }
 
-    /* Takes data, returns this, use with caution */
-    template <int PROTOCOL>
-    static void res_writeRaw(const FunctionCallbackInfo<Value> &args) {
-        Isolate *isolate = args.GetIsolate();
-        auto *res = getHttpResponse<PROTOCOL>(args);
+    /* Begins chunked encoding mode and flushes headers immediately. Takes nothing, returns this */
+    template <int SSL>
+    static void res_beginWrite(const FunctionCallbackInfo<Value> &args) {
+        auto *res = getHttpResponse<SSL>(args);
         if (res) {
-            NativeString data(args.GetIsolate(), args[0]);
-            if (data.isInvalid(args)) {
-                return;
-            }
-
+            /* We assume the user has called cork() or we are inside an implicit corked handler context */
             assumeCorked();
-            res->writeRaw(data.getString());
+            res->beginWrite();
 
             args.GetReturnValue().Set(args.This());
-        }
-    }
-
-    template <int PROTOCOL>
-    static void res_streamFile(const FunctionCallbackInfo<Value> &args) {
-        Isolate *isolate = args.GetIsolate();
-        auto *res = getHttpResponse<PROTOCOL>(args);
-        if (res) {
-            if (missingArguments(1, args)) {
-                return;
-            }
-
-            int fd = -1;
-
-            if (args[0]->IsString()) {
-                NativeString path(isolate, args[0]);
-                if (path.isInvalid(args)) {
-                    return;
-                }
-                fd = open(path.getString().data(), O_RDONLY);
-                if (fd < 0) {
-                    isolate->ThrowException(v8::Exception::Error(
-                        String::NewFromUtf8(isolate, "Failed to open file", NewStringType::kNormal).ToLocalChecked()
-                    ));
-                    return;
-                }
-            } else {
-                fd = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-            }
-
-            // streamFile ends the response
-            invalidateResObject(args);
-
-            assumeCorked();
-            res->streamFile(fd); // closes by default
         }
     }
 
@@ -789,6 +749,7 @@ struct HttpResponseWrapper {
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "onDataV2", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_onDataV2<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "collectBody", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_collectBody<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getWriteOffset", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getWriteOffset<SSL>));
+                resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "beginWrite", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_beginWrite<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "getRemoteAddress", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_getRemoteAddress<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "cork", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_cork<SSL>));
                 resTemplateLocal->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "collect", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, res_cork<SSL>));
