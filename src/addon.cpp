@@ -416,10 +416,7 @@ void uWS_unlock(const FunctionCallbackInfo<Value> &args) {
     kvMutex.unlock();
 }
 
-PerContextData *Main(Local<Object> exports) {
-
-    /* We pass isolate everywhere */
-    Isolate *isolate = exports->GetIsolate();
+PerContextData *Main(Isolate *isolate, Local<Object> exports) {
 
     /* Init the template objects, SSL and non-SSL, store it in per context data */
     PerContextData *perContextData = new PerContextData;
@@ -526,13 +523,14 @@ PerContextData *Main(Local<Object> exports) {
 #include <node.h>
 extern "C" NODE_MODULE_EXPORT void
 NODE_MODULE_INITIALIZER(Local<Object> exports, Local<Value> module, Local<Context> context) {
+    Isolate *isolate = Isolate::GetCurrent();
     /* Integrate uSockets with existing libuv loop */
-    uWS::Loop::get(node::GetCurrentEventLoop(context->GetIsolate()));
+    uWS::Loop::get(node::GetCurrentEventLoop(isolate));
     /* Register vanilla V8 addon */
-    PerContextData *perContextData = Main(exports);
+    PerContextData *perContextData = Main(isolate, exports);
 
     /* We cannot rely on process.exit or process.beforeExit when it comes to WorkerThreads */
-    node::AddEnvironmentCleanupHook(context->GetIsolate(), [](void *arg) {
+    node::AddEnvironmentCleanupHook(isolate, [](void *arg) {
 
         PerContextData *perContextData = (PerContextData *) arg;
 

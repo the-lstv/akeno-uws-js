@@ -29,7 +29,7 @@ struct HttpRequestWrapper {
     static inline constexpr decltype(auto) getHttpRequest(const FunctionCallbackInfo<Value> &args) {
         Isolate *isolate = args.GetIsolate();
         /* Thow on deleted request */
-        auto *req = (uWS::HttpRequest *) args.This()->GetAlignedPointerFromInternalField(0);
+        auto *req = (uWS::HttpRequest *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
         if (!req) {
             args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "uWS.HttpRequest must not be accessed after await or route handler return. See documentation for uWS.HttpRequest and consult the user manual.", NewStringType::kNormal).ToLocalChecked())));
         }

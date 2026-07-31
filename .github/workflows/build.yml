@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 25
+          node-version: 26
       - name: Update binaries
         run: |
           git clone --recursive https://github.com/uNetworking/uWebSockets.js.git

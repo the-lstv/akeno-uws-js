@@ -29,7 +29,7 @@ struct WebSocketWrapper {
     template <bool SSL>
     static inline uWS::WebSocket<SSL, true, PerSocketData> *getWebSocket(const FunctionCallbackInfo<Value> &args) {
         Isolate *isolate = args.GetIsolate();
-        auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) args.This()->GetAlignedPointerFromInternalField(0);
+        auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
         if (!ws) {
             args.GetReturnValue().Set(isolate->ThrowException(v8::Exception::Error(String::NewFromUtf8(isolate, "Invalid access of closed uWS.WebSocket/SSLWebSocket.", NewStringType::kNormal).ToLocalChecked())));
         }
@@ -37,7 +37,8 @@ struct WebSocketWrapper {
     }
 
     static inline void invalidateWsObject(const FunctionCallbackInfo<Value> &args) {
-        args.This()->SetAlignedPointerInInternalField(0, nullptr);
+        //args.This()->SetAlignedPointerInInternalField(0, nullptr);
+        setInternalPointer(args.This(), nullptr);
     }
 
     /* Takes nothing returns holder (only used to fool TypeScript, as a conversion from WS to UserData) */
@@ -335,7 +336,7 @@ template <bool SSL>
 static uint32_t uWS_WebSocket_send_fast_string(v8::Local<v8::Object> receiver, 
                                                const v8::FastOneByteString& message, 
                                                bool isBinary, bool compress) {
-    auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) receiver->GetAlignedPointerFromInternalField(0);
+    auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) getInternalPointer(receiver);//->GetAlignedPointerFromInternalField(0);
     if (!ws) return 0;
     return ws->send(std::string_view(message.data, message.length),
                     isBinary ? uWS::OpCode::BINARY : uWS::OpCode::TEXT, compress);
@@ -346,7 +347,7 @@ template <bool SSL>
 static uint32_t uWS_WebSocket_send_fast_buffer(v8::Local<v8::Object> receiver, 
                                                v8::Local<v8::Value> message, 
                                                bool isBinary, bool compress) {
-    auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) receiver->GetAlignedPointerFromInternalField(0);
+    auto *ws = (uWS::WebSocket<SSL, true, PerSocketData> *) getInternalPointer(receiver);//->GetAlignedPointerFromInternalField(0);
     if (!ws) return 0;
 
     char* data = nullptr;

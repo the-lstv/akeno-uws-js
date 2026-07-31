@@ -93,10 +93,12 @@ static inline void initReqResObjects(PerContextData *perContextData, uWS::HttpRe
     Local<Context> context = isolate->GetCurrentContext();
 
     Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
-    reqObject->SetAlignedPointerInInternalField(0, req);
+    // reqObject->SetAlignedPointerInInternalField(0, req);
+    setInternalPointer(reqObject, req);
 
     Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
-    resObject->SetAlignedPointerInInternalField(0, res);
+    //resObject->SetAlignedPointerInInternalField(0, res);
+    setInternalPointer(resObject, res);
 
     std::string_view method = req->getCaseSensitiveMethod();
     std::string_view url = req->getUrl();
@@ -149,7 +151,7 @@ static inline void initReqResObjects(PerContextData *perContextData, uWS::HttpRe
 /* app.route(pattern, handler) — adds a domain route. */
 /* TODO: This NEEDS cleanup; the current code is mostly a PoC */
 void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
-    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -216,7 +218,8 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             CallJS(isolate, cbPtr->Get(isolate), 2, argv);
 
             // Invalidate request
-            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            // reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            setInternalPointer(reqObject, nullptr);
         };
 
         // Instantiate the template lambda for both HTTP and HTTPS
@@ -233,9 +236,9 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
 
         /* Fast-path: WebApp wrapper object (routes through C++ WebServer) */
         if (handlerObject->InternalFieldCount() >= 2 &&
-            handlerObject->GetAlignedPointerFromInternalField(1) == (void *)&kWebAppTag) {
+            getInternalPointer(handlerObject, 1) == (void *)&kWebAppTag) {
 
-            Akeno::WebApp *webAppPtr = (Akeno::WebApp *) handlerObject->GetAlignedPointerFromInternalField(0);
+            Akeno::WebApp *webAppPtr = (Akeno::WebApp *) getInternalPointer(handlerObject, 0);
             if (!webAppPtr) {
                 std::cerr << "Warning: Attempted to route to a WebApp with a null pointer. Make sure your WebApp wrapper object is valid and properly initialized. See documentation for app.registerWebApp and consult the user manual." << std::endl;
                 args.GetReturnValue().Set(args.This());
@@ -283,7 +286,8 @@ void uWS_App_route(const FunctionCallbackInfo<Value> &args) {
             Local<Value> argv[] = {reqObject, resObject, objectValue};
             CallJS(isolate, onObjectLf, 3, argv);
 
-            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            // reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            setInternalPointer(reqObject, nullptr);
         };
 
         handler = DomainHandler::onRequestBoth(
@@ -495,12 +499,12 @@ void uWS_WebApp_setOptions(const FunctionCallbackInfo<Value> &args) {
     }
 
     Local<Object> self = args.This();
-    if (self->InternalFieldCount() < 2 || self->GetAlignedPointerFromInternalField(1) != (void *)&kWebAppTag) {
+    if (self->InternalFieldCount() < 2 || getInternalPointer(self, 1) != (void *)&kWebAppTag) {
         args.GetReturnValue().Set(args.This());
         return;
     }
 
-    Akeno::WebApp *webApp = (Akeno::WebApp *) self->GetAlignedPointerFromInternalField(0);
+    Akeno::WebApp *webApp = (Akeno::WebApp *) getInternalPointer(self, 0);
     if (!webApp) {
         args.GetReturnValue().Set(args.This());
         return;
@@ -617,7 +621,7 @@ void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
         FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
             Isolate *isolate = args.GetIsolate();
             if (missingArguments(2, args)) return;
-            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            Akeno::WebApp *webApp = (Akeno::WebApp *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
             if (!webApp) return;
 
             NativeString pathVal(isolate, args[0]);
@@ -660,7 +664,7 @@ void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
         FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
             Isolate *isolate = args.GetIsolate();
             if (missingArguments(1, args)) return;
-            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            Akeno::WebApp *webApp = (Akeno::WebApp *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
             if (!webApp) return;
 
             NativeString pathVal(isolate, args[0]);
@@ -674,7 +678,7 @@ void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
         String::NewFromUtf8(isolate, "clearAttributes", NewStringType::kNormal).ToLocalChecked(),
         FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
             Isolate *isolate = args.GetIsolate();
-            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            Akeno::WebApp *webApp = (Akeno::WebApp *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
             if (!webApp) return;
             
             webApp->clearAttributes();
@@ -686,7 +690,7 @@ void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
         FunctionTemplate::New(isolate, [](const FunctionCallbackInfo<Value> &args) {
             Isolate *isolate = args.GetIsolate();
             if (missingArguments(2, args)) return;
-            Akeno::WebApp *webApp = (Akeno::WebApp *) args.This()->GetAlignedPointerFromInternalField(0);
+            Akeno::WebApp *webApp = (Akeno::WebApp *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
             if (!webApp) return;
 
             int code = args[0]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
@@ -702,15 +706,17 @@ void uWS_WebApp_constructor(const FunctionCallbackInfo<Value> &args) {
                                    ->NewInstance(isolate->GetCurrentContext())
                                    .ToLocalChecked();
 
-    localWebApp->SetAlignedPointerInInternalField(0, webApp);
-    localWebApp->SetAlignedPointerInInternalField(1, (void *) &kWebAppTag);
+    // localWebApp->SetAlignedPointerInInternalField(0, webApp);
+    // localWebApp->SetAlignedPointerInInternalField(1, (void *) &kWebAppTag);
+    setInternalPointer(localWebApp, webApp);
+    setInternalPointer(localWebApp, (void *) &kWebAppTag, 1);
 
     args.GetReturnValue().Set(localWebApp);
 }
 
 /* app.unroute(pattern) — removes a domain route. */
 void uWS_App_unroute(const FunctionCallbackInfo<Value> &args) {
-    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -737,7 +743,7 @@ void uWS_App_onObject(const FunctionCallbackInfo<Value> &args) {
     }
 
     auto* perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
-    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     auto &callbackPtr = perContextData->appObjectCallbacks[app];
     if (!callbackPtr) {
@@ -764,7 +770,7 @@ void uWS_App_onObject(const FunctionCallbackInfo<Value> &args) {
 
 /* app.publish(topic, message, isBinary, compress) */
 void uWS_App_publish(const FunctionCallbackInfo<Value> &args) {
-    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -790,7 +796,7 @@ void uWS_App_publish(const FunctionCallbackInfo<Value> &args) {
 
 /* app.numSubscribers(topic) */
 void uWS_App_numSubscribers(const FunctionCallbackInfo<Value> &args) {
-    uWS::App *app = (uWS::App *) args.This()->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     Isolate *isolate = args.GetIsolate();
 
@@ -836,7 +842,8 @@ void uWS_App_constructor(const FunctionCallbackInfo<Value> &args) {
     extern Akeno::DomainRouter<DomainHandler> domainRouter;
     app->setDomainRouter(&domainRouter);
 
-    localApp->SetAlignedPointerInInternalField(0, app);
+    // localApp->SetAlignedPointerInInternalField(0, app);
+    setInternalPointer(localApp, app);
 
     /* Store for cleanup */
     perContextData->apps.emplace_back(app);
@@ -939,7 +946,7 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 
     PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();
 
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     /* This one is default constructed with defaults */
     typename PROTO::template WebSocketBehavior<PerSocketData> behavior = {};
 
@@ -1035,16 +1042,19 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 
             Local<Function> upgradeLf = Local<Function>::New(isolate, upgradePf);
             Local<Object> resObject = perContextData->resTemplate[SSL ? 1 : 0].Get(isolate)->Clone();
-            resObject->SetAlignedPointerInInternalField(0, res);
+            //resObject->SetAlignedPointerInInternalField(0, res);
+            setInternalPointer(resObject, res);
 
             Local<Object> reqObject = perContextData->reqTemplate[0].Get(isolate)->Clone();
-            reqObject->SetAlignedPointerInInternalField(0, req);
+            //reqObject->SetAlignedPointerInInternalField(0, req);
+            setInternalPointer(reqObject, req);
 
             Local<Value> argv[3] = {resObject, reqObject, External::New(isolate, (void *) context)};
             CallJS(isolate, upgradeLf, 3, argv);
 
             /* Properly invalidate req */
-            reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            //reqObject->SetAlignedPointerInInternalField(0, nullptr);
+            setInternalPointer(reqObject, nullptr);
         };
     }
 
@@ -1057,7 +1067,8 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 
         /* Create a new websocket object */
         Local<Object> wsObject = perContextData->wsTemplate[wsIdx].Get(isolate)->Clone();
-        wsObject->SetAlignedPointerInInternalField(0, ws);
+        // wsObject->SetAlignedPointerInInternalField(0, ws);
+        setInternalPointer(wsObject, ws);
 
         /* Retrieve temporary userData object */
         PerSocketData *perSocketData = (PerSocketData *) ws->getUserData();
@@ -1178,7 +1189,8 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
         Local<Object> wsObject = Local<Object>::New(isolate, perSocketData->socketPf);
 
         /* Invalidate this wsObject */
-        wsObject->SetAlignedPointerInInternalField(0, nullptr);
+        // wsObject->SetAlignedPointerInInternalField(0, nullptr);
+        setInternalPointer(wsObject, nullptr);
 
         /* Only call close handler if we have one set */
         Local<Function> closeLf = Local<Function>::New(isolate, closePf);
@@ -1201,7 +1213,7 @@ void uWS_Proto_ws(const FunctionCallbackInfo<Value> &args) {
 /* protocol.close() */
 template <typename PROTO>
 void uWS_Proto_close(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     proto->close();
     args.GetReturnValue().Set(args.This());
 }
@@ -1209,7 +1221,7 @@ void uWS_Proto_close(const FunctionCallbackInfo<Value> &args) {
 /* protocol.listen(cb, path) — Unix domain socket */
 template <typename PROTO>
 void uWS_Proto_listen_unix(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     if (missingArguments(2, args)) {
@@ -1236,7 +1248,7 @@ void uWS_Proto_listen_unix(const FunctionCallbackInfo<Value> &args) {
 /* protocol.listen([host], port, [options], callback) */
 template <typename PROTO>
 void uWS_Proto_listen(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     if (missingArguments(2, args)) {
@@ -1274,7 +1286,7 @@ void uWS_Proto_listen(const FunctionCallbackInfo<Value> &args) {
 /* protocol.filter(handler) */
 template <typename PROTO>
 void uWS_Proto_filter(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     Callback checkedCallback(args.GetIsolate(), args[0]);
     if (checkedCallback.isInvalid(args)) {
@@ -1290,7 +1302,8 @@ void uWS_Proto_filter(const FunctionCallbackInfo<Value> &args) {
 
         constexpr int idx = getProtoTypeIndex<PROTO>();
         Local<Object> resObject = perContextData->resTemplate[idx].Get(isolate)->Clone();
-        resObject->SetAlignedPointerInInternalField(0, res);
+        //resObject->SetAlignedPointerInInternalField(0, res);
+        setInternalPointer(resObject, res);
 
         Local<Value> argv[] = {resObject, Local<Value>::Cast(Integer::New(isolate, count))};
         CallJS(isolate, cb.Get(isolate), 2, argv);
@@ -1302,7 +1315,7 @@ void uWS_Proto_filter(const FunctionCallbackInfo<Value> &args) {
 /* protocol.bind(appObject) — bind this protocol to an App */
 template <typename PROTO>
 void uWS_Proto_bind(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
 
     if (missingArguments(1, args)) {
         return;
@@ -1315,7 +1328,7 @@ void uWS_Proto_bind(const FunctionCallbackInfo<Value> &args) {
     }
 
     Local<Object> appObject = Local<Object>::Cast(args[0]);
-    uWS::App *app = (uWS::App *) appObject->GetAlignedPointerFromInternalField(0);
+    uWS::App *app = (uWS::App *) getInternalPointer(appObject);//->GetAlignedPointerFromInternalField(0);
 
     proto->bind(app);
 
@@ -1325,7 +1338,7 @@ void uWS_Proto_bind(const FunctionCallbackInfo<Value> &args) {
 /* protocol.unbind() — unbind this protocol from its current App */
 template <typename PROTO>
 void uWS_Proto_unbind(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     proto->unbind();
     args.GetReturnValue().Set(args.This());
 }
@@ -1333,11 +1346,17 @@ void uWS_Proto_unbind(const FunctionCallbackInfo<Value> &args) {
 /* protocol.adoptSocket(fd) */
 template <typename PROTO>
 void uWS_Proto_adoptSocket(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     int32_t fd = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-    proto->adoptSocket(fd);
+
+    NativeString ip(isolate, args[1]);
+    if (ip.isInvalid(args)) {
+        return;
+    }
+
+    proto->adoptSocket(fd, ip.getString());
 
     args.GetReturnValue().Set(args.This());
 }
@@ -1345,7 +1364,7 @@ void uWS_Proto_adoptSocket(const FunctionCallbackInfo<Value> &args) {
 /* protocol.removeChildAppDescriptor(descriptor) */
 template <typename PROTO>
 void uWS_Proto_removeChildApp(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     double descriptor = args[0]->NumberValue(isolate->GetCurrentContext()).ToChecked();
@@ -1361,7 +1380,7 @@ void uWS_Proto_removeChildApp(const FunctionCallbackInfo<Value> &args) {
 /* protocol.addChildAppDescriptor(descriptor) */
 template <typename PROTO>
 void uWS_Proto_addChildApp(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     double descriptor = args[0]->NumberValue(isolate->GetCurrentContext()).ToChecked();
@@ -1377,7 +1396,7 @@ void uWS_Proto_addChildApp(const FunctionCallbackInfo<Value> &args) {
 /* protocol.getDescriptor() */
 template <typename PROTO>
 void uWS_Proto_getDescriptor(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     static_assert(sizeof(double) >= sizeof(proto));
@@ -1394,7 +1413,7 @@ void uWS_Proto_getDescriptor(const FunctionCallbackInfo<Value> &args) {
 /* protocol.addServerName(hostname, options) */
 template <typename PROTO>
 void uWS_Proto_addServerName(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     NativeString hostnamePatternValue(isolate, args[0]);
@@ -1419,7 +1438,7 @@ void uWS_Proto_addServerName(const FunctionCallbackInfo<Value> &args) {
 /* protocol.removeServerName(hostname) */
 template <typename PROTO>
 void uWS_Proto_removeServerName(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     NativeString hostnamePatternValue(isolate, args[0]);
@@ -1439,7 +1458,7 @@ void uWS_Proto_removeServerName(const FunctionCallbackInfo<Value> &args) {
 /* protocol.missingServerName(handler) */
 template <typename PROTO>
 void uWS_Proto_missingServerName(const FunctionCallbackInfo<Value> &args) {
-    PROTO *proto = (PROTO *) args.This()->GetAlignedPointerFromInternalField(0);
+    PROTO *proto = (PROTO *) getInternalPointer(args.This());//->GetAlignedPointerFromInternalField(0);
     Isolate *isolate = args.GetIsolate();
 
     UniquePersistent<Function> missingPf;
@@ -1505,7 +1524,8 @@ void uWS_Proto_constructor(const FunctionCallbackInfo<Value> &args) {
     protoTemplate->PrototypeTemplate()->Set(String::NewFromUtf8(isolate, "missingServerName", NewStringType::kNormal).ToLocalChecked(), FunctionTemplate::New(isolate, uWS_Proto_missingServerName<PROTO>, args.Data()));
 
     Local<Object> localProto = protoTemplate->GetFunction(isolate->GetCurrentContext()).ToLocalChecked()->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
-    localProto->SetAlignedPointerInInternalField(0, proto);
+    // localProto->SetAlignedPointerInInternalField(0, proto);
+    setInternalPointer(localProto, proto);
 
     /* Store for cleanup */
     PerContextData *perContextData = (PerContextData *) Local<External>::Cast(args.Data())->Value();

@@ -33,6 +33,25 @@ namespace Akeno {
     class WebApp;
 }
 
+/* Getting internal pointer is different in recent V8 versions */
+#if (V8_MAJOR_VERSION == 14)
+    void *getInternalPointer(const Local<Object> &holder, int index = 0) {
+        return holder->GetAlignedPointerFromInternalField(0, index);
+    }
+
+    void setInternalPointer(const Local<Object> &holder, void *value, int index = 0) {
+        holder->SetAlignedPointerInInternalField(index, value, 0);
+    }
+#else
+    void *getInternalPointer(const Local<Object> &holder, int index = 0) {
+        return holder->GetAlignedPointerFromInternalField(index);
+    }
+
+    void setInternalPointer(const Local<Object> &holder, void *value, int index = 0) {
+        holder->SetAlignedPointerInInternalField(index, value);
+    }
+#endif
+
 /* Unfortunately we _have_ to depend on Node.js crap */
 #include <node.h>
 
@@ -159,7 +178,7 @@ class NativeString {
     bool invalid = false;
 
     // Static thread-local state shared by all NativeString instances on this thread
-    inline static thread_local std::vector<char> pool = std::vector<char>(8 * 1024 * 1024);
+    inline static thread_local std::vector<char> pool = std::vector<char>(128 * 1024);
     inline static thread_local size_t pool_offset = 0;
     inline static thread_local int ref_count = 0;
 
@@ -199,26 +218,24 @@ public:
         } else if (value->IsString()) {
             Local<String> string = Local<String>::Cast(value);
 
-            #if NODE_MODULE_VERSION >= 137
-            if constexpr (AllowStringView) {
+            /* StringView path is Latin-1, not Utf-8 */
 
-                String::ValueView strView(isolate, string);
-                if (strView.is_one_byte()) {
-                    length = strView.length();
-                    data = (char *) strView.data8();
-                    
-                    return;
-                }
-            }
+            #if (V8_MAJOR_VERSION == 14)
+                // Fallback
+                length = string->Utf8LengthV2(isolate);
+                data = alloc(length);
+                allocated = true;
+                string->WriteUtf8V2(isolate, data, length);
+            #else
+                // Fallback
+                length = string->Utf8Length(isolate);
+                data = alloc(length);
+                allocated = true;
+                string->WriteUtf8(isolate, data, length, nullptr, String::WriteOptions::NO_NULL_TERMINATION);
             #endif
 
-            // Fallback
-            length = string->Utf8Length(isolate);
-            data = alloc(length);
-            allocated = true;
-            string->WriteUtf8(isolate, data, length, nullptr, String::WriteOptions::NO_NULL_TERMINATION);
 
-        } else if (value->IsTypedArray()) {
+        } else if (value->IsArrayBufferView()) { /* DataView or TypedArray */
             Local<ArrayBufferView> arrayBufferView = Local<ArrayBufferView>::Cast(value);
             auto contents = arrayBufferView->Buffer()->GetBackingStore();
             length = arrayBufferView->ByteLength();
@@ -240,7 +257,7 @@ public:
 
     bool isInvalid(const FunctionCallbackInfo<Value> &args) {
         if (invalid) {
-            args.GetReturnValue().Set(args.GetIsolate()->ThrowException(v8::Exception::Error(String::NewFromUtf8(args.GetIsolate(), "Text and data can only be passed by String, ArrayBuffer or TypedArray.", NewStringType::kNormal).ToLocalChecked())));
+            args.GetReturnValue().Set(args.GetIsolate()->ThrowException(v8::Exception::Error(String::NewFromUtf8(args.GetIsolate(), "Text and data can only be passed by String, ArrayBuffer or ArrayBufferView.", NewStringType::kNormal).ToLocalChecked())));
         }
         return invalid;
     }

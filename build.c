@@ -74,33 +74,6 @@ struct node_version {
     {"v25.0.0", "141"}
 };
 
-int arch_is(const char *arch, const char *expected) {
-    return strcmp(arch, expected) == 0;
-}
-
-const char *windows_arch_name(const char *arch) {
-    if (arch_is(arch, X64)) {
-        return "x64";
-    }
-    if (arch_is(arch, ARM64)) {
-        return "arm64";
-    }
-    if (arch_is(arch, ARM)) {
-        return "arm";
-    }
-    return NULL;
-}
-
-const char *windows_build_dir(const char *arch) {
-    if (arch_is(arch, X64)) {
-        return "win-x64";
-    }
-    if (arch_is(arch, ARM64)) {
-        return "win-arm64";
-    }
-    return NULL;
-}
-
 /* Downloads headers, creates folders */
 void prepare(const char *windows_lib_arch) {
 #ifdef IS_WINDOWS
@@ -201,7 +174,6 @@ void build_boringssl(const char *arch) {
 
 /* Build for Unix systems */
 void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const char *arch) {
-
     const char *opt_flags = debug_mode ? "-g -O0" : "-O3";
     const char *http3_flags = disable_http3 ? "-DUWS_NO_HTTP3" : "-DLIBUS_USE_QUIC";
     const char *http3_include = disable_http3 ? "" : " -I uWebSockets/uSockets/lsquic/include";
@@ -209,7 +181,7 @@ void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const
     char c_shared[1024];
     char cpp_shared[1024];
     snprintf(c_shared, sizeof(c_shared), "-DWIN32_LEAN_AND_MEAN -DLIBUS_USE_LIBUV -DUWS_USE_LIBDEFLATE %s -I uWebSockets/libdeflate -I uWebSockets/uSockets/boringssl/include -pthread -DLIBUS_USE_OPENSSL -flto %s%s -c -fPIC -I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c", http3_flags, opt_flags, http3_include);
-    snprintf(cpp_shared, sizeof(cpp_shared), "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DUWS_USE_LIBDEFLATE -DLIBUS_USE_LIBUV %s -I uWebSockets/uSockets/boringssl/include -I uWebSockets/libdeflate -pthread -DLIBUS_USE_OPENSSL -flto %s%s -c -fPIC -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp -static -lbrotlienc", http3_flags, opt_flags, http3_include); // Static link so we don't need to depend
+    snprintf(cpp_shared, sizeof(cpp_shared), "-DWIN32_LEAN_AND_MEAN -DUWS_WITH_PROXY -DUWS_REMOTE_ADDRESS_USERSPACE -DUWS_USE_LIBDEFLATE -DLIBUS_USE_LIBUV %s -I uWebSockets/uSockets/boringssl/include -I uWebSockets/libdeflate -pthread -DLIBUS_USE_OPENSSL -flto %s%s -c -fPIC -std=c++20 -I uWebSockets/uSockets/src -I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp -static -lbrotlienc", http3_flags, opt_flags, http3_include); // Static link so we don't need to depend
     
     char lsquic_libs[512] = "";
     if (!disable_http3) {
@@ -241,8 +213,9 @@ void copy_files() {
 #endif
 }
 
-/* Special case for windows (MSVC) */
+/* Special case for windows */
 void build_windows(const char *os, const char *arch) {
+    // TODO: reset to upstream
     const char *http3_defs = disable_http3 ? "/DUWS_NO_HTTP3" : "/DLIBUS_USE_QUIC";
     const char *http3_includes = disable_http3 ? "" : " /I uWebSockets/uSockets/lsquic/include /I uWebSockets/uSockets/lsquic/wincompat";
     const char *http3_libs = disable_http3 ? "" : " uWebSockets\\uSockets\\lsquic\\src\\liblsquic\\Debug\\lsquic.lib";
@@ -252,7 +225,7 @@ void build_windows(const char *os, const char *arch) {
     char cpp_shared[1800];
 
     snprintf(c_shared, sizeof(c_shared), "/nologo /c /FS /MT /DWIN32_LEAN_AND_MEAN /DLIBUS_USE_LIBUV /DUWS_USE_LIBDEFLATE %s /I uWebSockets/uSockets/boringssl/include /I uWebSockets/libdeflate /DLIBUS_USE_OPENSSL %s%s /I uWebSockets/uSockets/src uWebSockets/uSockets/src/*.c uWebSockets/uSockets/src/eventing/*.c uWebSockets/uSockets/src/crypto/*.c", http3_defs, opt_flags, http3_includes);
-    snprintf(cpp_shared, sizeof(cpp_shared), "/nologo /c /FS /MT /std:c++20 /EHsc /DWIN32_LEAN_AND_MEAN /DUWS_WITH_PROXY /DLIBUS_USE_LIBUV /DUWS_USE_LIBDEFLATE %s /I uWebSockets/uSockets/boringssl/include /I uWebSockets/libdeflate /DLIBUS_USE_OPENSSL %s%s /I uWebSockets/uSockets/src /I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp", http3_defs, opt_flags, http3_includes);
+    snprintf(cpp_shared, sizeof(cpp_shared), "/nologo /c /FS /MT /std:c++20 /EHsc /DWIN32_LEAN_AND_MEAN /DUWS_WITH_PROXY /DUWS_REMOTE_ADDRESS_USERSPACE /DLIBUS_USE_LIBUV /DUWS_USE_LIBDEFLATE %s /I uWebSockets/uSockets/boringssl/include /I uWebSockets/libdeflate /DLIBUS_USE_OPENSSL %s%s /I uWebSockets/uSockets/src /I uWebSockets/src src/addon.cpp uWebSockets/uSockets/src/crypto/sni_tree.cpp", http3_defs, opt_flags, http3_includes);
 
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
         if (selected_version && strcmp(versions[i].name, selected_version)) {
@@ -275,7 +248,7 @@ void build_windows(const char *os, const char *arch) {
 
 int main(int argc, char **argv) {
 #ifdef IS_WINDOWS
-    printf("[Warning] Building Akeno-uWS for Windows is not supported and Akeno does not support Windows. Any Windows build is considered experimental/unsupported and can break or not be up to expectations. Use at your own risk\n\n");
+    printf("[Warning] Building Akeno-uWS for Windows is not fully supported. Any Windows build is considered experimental/unsupported and can break or not be up to expectations. Use at your own risk\n\n");
 #endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--addon-only")) {
@@ -338,6 +311,12 @@ int main(int argc, char **argv) {
 
 #ifdef IS_WINDOWS
     build_windows(OS, X64);
+    // /* We can use clang, but we currently do use cl.exe still */
+    // build_windows("clang -fms-runtime-lib=static",
+    //       "clang++ -fms-runtime-lib=static",
+    //       "",
+    //       OS,
+    //       X64);
 #else
 #ifdef IS_MACOS
 
