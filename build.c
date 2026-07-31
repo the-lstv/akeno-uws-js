@@ -43,6 +43,8 @@ int debug_mode = 0;
 int disable_http3 = 0;
 char *selected_version = NULL;
 
+int buildingForElectron = 0;
+
 int exists(const char *fname) {
     FILE *file;
     if ((file = fopen(fname, "r"))) {
@@ -64,55 +66,88 @@ int run(const char *cmd, ...) {
 }
 
 /* List of Node.js versions */
+/* List of Node.js versions */
 struct node_version {
     char *name;
     char *abi;
+    char *runtime;
 } versions[] = {
-    {"v24.0.0", "137"},
-    {"v20.0.0", "115"},
-    {"v22.0.0", "127"},
-    {"v25.0.0", "141"}
+    {"v20.0.0", "115", "node"},
+    {"v22.0.0", "127", "node"},
+    {"v24.0.0", "137", "node"},
+    {"v25.0.0", "141", "node"},
+    {"v26.0.0", "147", "node"},
+
+    // We can also build for other runtimes, since Electron has it's own setup
+    // No guarantee it will work though as most v8 APIs when used in an addon are broken on Electron.
+    // {"v43.2.0", "148", "electron"},
 };
 
 /* Downloads headers, creates folders */
 void prepare(const char *windows_lib_arch) {
 #ifdef IS_WINDOWS
-    if (run("if not exist dist mkdir dist") || run("if not exist targets mkdir targets")) {
+    if (run("if not exist dist mkdir dist") || run("if not exist fragments mkdir fragments") || run("if not exist targets mkdir targets") || run("if not exist targets\\node mkdir targets\\node") || run("if not exist targets\\electron mkdir targets\\electron")) {
         return;
     }
 #else
-    if (run("mkdir -p dist") || run("mkdir -p targets")) {
+    if (run("mkdir -p dist") || run("mkdir -p fragments") || run("mkdir -p targets") || run("mkdir -p targets/node") || run("mkdir -p targets/electron")) {
         return;
     }
 #endif
-
     /* For all versions */
+    int j = 0;
     for (unsigned int i = 0; i < sizeof(versions) / sizeof(struct node_version); i++) {
         if (selected_version && strcmp(versions[i].name, selected_version)) {
             continue;
         }
 
+        if(buildingForElectron && strcmp(versions[i].runtime, "electron") != 0) {
+            continue;
+        } else if(!buildingForElectron && strcmp(versions[i].runtime, "node") != 0) {
+            continue;
+        }
+
+        char source[256];
+        if(buildingForElectron) {
+            sprintf(source, "https://artifacts.electronjs.org/headers/dist/%s/node-%s-headers.tar.gz", versions[i].name, versions[i].name);
+        } else {
+            sprintf(source, "https://nodejs.org/dist/%s/node-%s-headers.tar.gz", versions[i].name, versions[i].name);
+        }
+
+        run("mkdir -p targets/%s/%s", versions[i].runtime, versions[i].name);
+
         char path[256];
-        sprintf(path, "node-%s-headers.tar.gz", versions[i].name);
+        sprintf(path, "targets/%s/node-%s-headers.tar.gz", versions[i].runtime, versions[i].name);
         if (!exists(path)) {
-            run("curl -OJ https://nodejs.org/dist/%s/node-%s-headers.tar.gz", versions[i].name, versions[i].name);
-        }
-        run("tar xzf node-%s-headers.tar.gz -C targets", versions[i].name);
-
-        sprintf(path, "targets/node-%s/node.lib", versions[i].name);
-        if (!exists(path)) {
-            run("curl https://nodejs.org/dist/%s/win-%s/node.lib > targets/node-%s/node.lib", versions[i].name, windows_lib_arch, versions[i].name);
+            run("cd targets/%s && curl -OJ %s", versions[i].runtime, source);
         }
 
-        /* v8-fast-api-calls.h is missing from the Node.js header distribution; fetch the matching Node version */
-        sprintf(path, "targets/node-%s/include/node/v8-fast-api-calls.h", versions[i].name);
-        if (!exists(path)) {
-            run("curl -fL https://raw.githubusercontent.com/nodejs/node/%s/deps/v8/include/v8-fast-api-calls.h > targets/node-%s/include/node/v8-fast-api-calls.h", versions[i].name, versions[i].name);
+        run("tar xzf %s --strip-components=1 -C targets/%s/%s", path, versions[i].runtime, versions[i].name);
+
+        if(!buildingForElectron) {
+#ifdef IS_WINDOWS
+            sprintf(path, "targets/%s/%s/node.lib", versions[i].runtime, versions[i].name);
+            if (!exists(path)) {
+                run("curl https://nodejs.org/dist/%s/win-%s/node.lib > targets/%s/%s/node.lib", versions[i].name, windows_lib_arch, versions[i].runtime, versions[i].name);
+            }
+#endif
+
+            /* v8-fast-api-calls.h is missing from the Node.js header distribution; fetch the matching Node version */
+            sprintf(path, "targets/%s/%s/include/node/v8-fast-api-calls.h", versions[i].runtime, versions[i].name);
+            if (!exists(path)) {
+                run("curl -fL https://raw.githubusercontent.com/nodejs/node/%s/deps/v8/include/v8-fast-api-calls.h > targets/%s/%s/include/node/v8-fast-api-calls.h", versions[i].name, versions[i].runtime, versions[i].name);
+            }
         }
+
+        j++;
 
         if (latest_only) {
             break;
         }
+    }
+
+    if (j == 0) {
+        printf("No versions were built. Check your --version argument.\n");
     }
 }
 
@@ -194,9 +229,10 @@ void build(char *compiler, char *cpp_compiler, char *cpp_linker, char *os, const
         }
 
         if(!addon_only) {
-            run("%s %s -I targets/node-%s/include/node", compiler, c_shared, versions[i].name);
-            run("%s %s -I targets/node-%s/include/node", cpp_compiler, cpp_shared, versions[i].name);
+            run("%s %s -I targets/%s/%s/include/node", compiler, c_shared, versions[i].runtime, versions[i].name);
+            run("%s %s -I targets/%s/%s/include/node", cpp_compiler, cpp_shared, versions[i].runtime, versions[i].name);
         }
+
         run("%s -pthread -flto %s *.o uWebSockets/uSockets/boringssl/%s/ssl/libssl.a uWebSockets/uSockets/boringssl/%s/crypto/libcrypto.a%s -I uWebSockets/libdeflate -std=c++20 -shared %s -o dist/akeno_%s_%s_%s.node", cpp_compiler, opt_flags, arch, arch, lsquic_libs, cpp_linker, os, arch, versions[i].abi);
 
         if(addon_only || latest_only) {
@@ -215,7 +251,6 @@ void copy_files() {
 
 /* Special case for windows */
 void build_windows(const char *os, const char *arch) {
-    // TODO: reset to upstream
     const char *http3_defs = disable_http3 ? "/DUWS_NO_HTTP3" : "/DLIBUS_USE_QUIC";
     const char *http3_includes = disable_http3 ? "" : " /I uWebSockets/uSockets/lsquic/include /I uWebSockets/uSockets/lsquic/wincompat";
     const char *http3_libs = disable_http3 ? "" : " uWebSockets\\uSockets\\lsquic\\src\\liblsquic\\Debug\\lsquic.lib";
@@ -234,8 +269,8 @@ void build_windows(const char *os, const char *arch) {
 
         if (!addon_only) {
             run("del /Q *.obj >NUL 2>&1");
-            run("cl %s /I targets/node-%s/include/node", c_shared, versions[i].name);
-            run("cl %s /I targets/node-%s/include/node", cpp_shared, versions[i].name);
+            run("cl %s /I targets/%s/%s/include/node", c_shared, versions[i].runtime, versions[i].name);
+            run("cl %s /I targets/%s/%s/include/node", cpp_shared, versions[i].runtime, versions[i].name);
         }
 
         run("link /NOLOGO /DLL /OUT:dist\\akeno_%s_%s_%s.node *.obj uWebSockets\\uSockets\\boringssl\\%s\\ssl\\ssl.lib uWebSockets\\uSockets\\boringssl\\%s\\crypto\\crypto.lib%s targets\\node-%s\\node.lib BrotliEnc.lib BrotliCommon.lib Ws2_32.lib Crypt32.lib Bcrypt.lib Iphlpapi.lib Userenv.lib Psapi.lib Advapi32.lib", os, arch, versions[i].abi, arch, arch, http3_libs, versions[i].name);

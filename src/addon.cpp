@@ -16,7 +16,7 @@
  */
 
 // Important TODO: keep version in sync with package.json
-#define AKENO_VERSION "1.6.9-beta"
+#define AKENO_VERSION "1.6.9-beta.1"
 
 /* We are only allowed to depend on µWS and V8 in this layer. */
 #include "akeno/DomainHandler.h"

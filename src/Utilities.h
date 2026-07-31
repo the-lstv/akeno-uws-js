@@ -36,7 +36,7 @@ namespace Akeno {
 /* Getting internal pointer is different in recent V8 versions */
 #if (V8_MAJOR_VERSION == 14)
     void *getInternalPointer(const Local<Object> &holder, int index = 0) {
-        return holder->GetAlignedPointerFromInternalField(0, index);
+        return holder->GetAlignedPointerFromInternalField(index, 0); // What is the order or change here exactly?
     }
 
     void setInternalPointer(const Local<Object> &holder, void *value, int index = 0) {

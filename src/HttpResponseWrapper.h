@@ -710,6 +710,61 @@ struct HttpResponseWrapper {
         }
     }
 
+    /* Takes data, returns this, use with caution */
+    template <int PROTOCOL>
+    static void res_writeRaw(const FunctionCallbackInfo<Value> &args) {
+        Isolate *isolate = args.GetIsolate();
+        auto *res = getHttpResponse<PROTOCOL>(args);
+
+        if (res) {
+            NativeString data(args.GetIsolate(), args[0]);
+            if (data.isInvalid(args)) {
+                return;
+            }
+
+            /* We assume the user has called cork() or we are inside an implicit corked handler context */
+            assumeCorked();
+            res->writeRaw(data.getString());
+
+            args.GetReturnValue().Set(args.This());
+        }
+    }
+
+    template <int PROTOCOL>
+    static void res_streamFile(const FunctionCallbackInfo<Value> &args) {
+        Isolate *isolate = args.GetIsolate();
+        auto *res = getHttpResponse<PROTOCOL>(args);
+        if (res) {
+            if (missingArguments(1, args)) {
+                return;
+            }
+
+            int fd = -1;
+
+            if (args[0]->IsString()) {
+                NativeString path(isolate, args[0]);
+                if (path.isInvalid(args)) {
+                    return;
+                }
+                fd = open(path.getString().data(), O_RDONLY);
+                if (fd < 0) {
+                    isolate->ThrowException(v8::Exception::Error(
+                        String::NewFromUtf8(isolate, "Failed to open file", NewStringType::kNormal).ToLocalChecked()
+                    ));
+                    return;
+                }
+            } else {
+                fd = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+            }
+
+            // streamFile ends the response
+            invalidateResObject(args);
+
+            assumeCorked();
+            res->streamFile(fd); // closes by default
+        }
+    }
+
     /* 0 = TCP, 1 = TLS, 2 = QUIC, 3 = CACHE */
     template <int SSL>
     static Local<Object> init(Isolate *isolate) {

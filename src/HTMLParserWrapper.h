@@ -316,7 +316,7 @@ static inline void ThrowTypeError(Isolate *isolate, const char *message) {
 }
 
 static HTMLParserWrapper *getParserWrapper(const FunctionCallbackInfo<Value> &args) {
-    return static_cast<HTMLParserWrapper *>(args.This()->GetAlignedPointerFromInternalField(0));
+    return static_cast<HTMLParserWrapper *> (getInternalPointer(args.This()));
 }
 
 static void Akeno_HTMLParser_context_write(const FunctionCallbackInfo<Value> &args) {
@@ -494,7 +494,7 @@ static void Akeno_HTMLParser_createContext(const FunctionCallbackInfo<Value> &ar
     ctxObject->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "embedded", NewStringType::kNormal).ToLocalChecked(), Boolean::New(isolate, true)).ToChecked();
     ctxObject->Set(isolate->GetCurrentContext(), String::NewFromUtf8(isolate, "strict", NewStringType::kNormal).ToLocalChecked(), Boolean::New(isolate, false)).ToChecked();
 
-    ctxObject->SetAlignedPointerInInternalField(0, parser);
+    setInternalPointer(ctxObject, parser);
     args.GetReturnValue().Set(ctxObject);
 }
 
@@ -696,7 +696,7 @@ void Akeno_HTMLParser_constructor(const FunctionCallbackInfo<Value> &args) {
 
     Local<Object> opts = (args.Length() > 0 && args[0]->IsObject()) ? Local<Object>::Cast(args[0]) : Object::New(isolate);
     HTMLParserWrapper *parser = new HTMLParserWrapper(isolate, opts);
-    parserObject->SetAlignedPointerInInternalField(0, parser);
+    setInternalPointer(parserObject, parser);
 
     args.GetReturnValue().Set(parserObject);
 }
