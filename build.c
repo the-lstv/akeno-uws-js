@@ -66,7 +66,6 @@ int run(const char *cmd, ...) {
 }
 
 /* List of Node.js versions */
-/* List of Node.js versions */
 struct node_version {
     char *name;
     char *abi;
@@ -75,7 +74,7 @@ struct node_version {
     {"v20.0.0", "115", "node"},
     {"v22.0.0", "127", "node"},
     {"v24.0.0", "137", "node"},
-    {"v25.0.0", "141", "node"},
+    // {"v25.0.0", "141", "node"}, // v25 is broken in the latest? Unsure why
     {"v26.0.0", "147", "node"},
 
     // We can also build for other runtimes, since Electron has it's own setup
@@ -120,9 +119,9 @@ void prepare(const char *windows_lib_arch) {
         sprintf(path, "targets/%s/node-%s-headers.tar.gz", versions[i].runtime, versions[i].name);
         if (!exists(path)) {
             run("cd targets/%s && curl -OJ %s", versions[i].runtime, source);
+            run("tar xzf %s --strip-components=1 -C targets/%s/%s", path, versions[i].runtime, versions[i].name);
         }
 
-        run("tar xzf %s --strip-components=1 -C targets/%s/%s", path, versions[i].runtime, versions[i].name);
 
         if(!buildingForElectron) {
 #ifdef IS_WINDOWS

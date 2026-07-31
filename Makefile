@@ -1,6 +1,10 @@
 default:
-	$(CC) build.c
-	./a.out || build.exe
+	$(CC) build.c -o build$(EXEEXT)
+ifeq ($(OS),Windows_NT)
+	build.exe --electron $(ARGS)
+else
+	./build --electron $(ARGS)
+endif
 upload_host:
 	git fetch origin binaries:binaries
 	git checkout binaries

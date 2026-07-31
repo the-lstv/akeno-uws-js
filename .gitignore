@@ -23,6 +23,8 @@ build.w.c
 *.obj
 zlib*
 
+build
+
 .vscode
 .idea
 .cache
