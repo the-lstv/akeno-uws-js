@@ -612,9 +612,9 @@ struct HttpResponseWrapper {
     }
 
     /* Begins chunked encoding mode and flushes headers immediately. Takes nothing, returns this */
-    template <int SSL>
+    template <int PROTOCOL>
     static void res_beginWrite(const FunctionCallbackInfo<Value> &args) {
-        auto *res = getHttpResponse<SSL>(args);
+        auto *res = getHttpResponse<PROTOCOL>(args);
         if (res) {
             /* We assume the user has called cork() or we are inside an implicit corked handler context */
             assumeCorked();
@@ -648,10 +648,10 @@ struct HttpResponseWrapper {
     }
 
     /* Takes function, returns this */
-    template <int SSL>
+    template <int PROTOCOL>
     static void res_cork(const FunctionCallbackInfo<Value> &args) {
         Isolate *isolate = args.GetIsolate();
-        auto *res = getHttpResponse<SSL>(args);
+        auto *res = getHttpResponse<PROTOCOL>(args);
         if (res) {
 
             res->cork([cb = Local<Function>::Cast(args[0]), isolate]() {
